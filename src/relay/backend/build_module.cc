@@ -400,8 +400,17 @@ class RelayBuildModule : public runtime::ModuleNode {
    */
   void BuildRelay(IRModule relay_module, const String& mod_name) {
     // Relay IRModule -> IRModule optimizations.
+    int x;
+    std::cout << AsText(relay_module, /*show_meta_data=*/false) << std::endl;
+    std::cout << "before optimization" << std::endl;
+    std::cin >> x;
+
     relay_module = OptimizeImpl(std::move(relay_module));
 
+    std::cout << AsText(relay_module, /*show_meta_data=*/false) << std::endl;
+    std::cout << "after optimization" << std::endl;
+    std::cin >> x;
+    
     // Get the updated function and new IRModule to build.
     // Instead of recreating the IRModule, we should look at the differences between this and the
     // incoming IRModule to see if we can just pass (IRModule, Function) to the code generator.
@@ -418,13 +427,15 @@ class RelayBuildModule : public runtime::ModuleNode {
 
     auto lowered_funcs = executor_codegen_->GetIRModule();
 
+    std::cout << AsText(lowered_funcs, /*show_meta_data=*/false) << std::endl;
+
     // No need to build for external functions.
     Target ext_dev("ext_dev");
     if (lowered_funcs.find(ext_dev) != lowered_funcs.end()) {
       lowered_funcs.Set(ext_dev, IRModule());
     }
 
-    const Target& host_target = config_->host_virtual_device->target;
+    const Target& host_target = config_->host_se_scope->target;
     const runtime::PackedFunc* pf = runtime::Registry::Get("codegen.LLVMModuleCreate");
 
     // Generate a placeholder function that attaches linked params as its arguments.
