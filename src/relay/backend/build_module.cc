@@ -392,6 +392,16 @@ class RelayBuildModule : public runtime::ModuleNode {
     return relay_module;
   }
 
+  void DumpIR(const ObjectRef& object, const std::string filename) {
+    char* dump_path = getenv("TVM_DUMP_TIR_DIR");
+    if (dump_path) {
+      std::string full_path = std::string(dump_path) + "/" + filename;
+      std::ofstream ofs(full_path, std::ofstream::trunc);
+      CHECK(ofs.good()) << "ValueError: Cannot create new file: " << full_path;
+      ofs << AsText(object, /*show_meta_data=*/false);
+      ofs.close();
+    }
+  }
   /*!
    * \brief Compile a Relay IR module to runtime module.
    *
@@ -400,16 +410,21 @@ class RelayBuildModule : public runtime::ModuleNode {
    */
   void BuildRelay(IRModule relay_module, const String& mod_name) {
     // Relay IRModule -> IRModule optimizations.
-    int x;
-    std::cout << AsText(relay_module, /*show_meta_data=*/false) << std::endl;
-    std::cout << "before optimization" << std::endl;
-    std::cin >> x;
+
+    // int x;
+    // std::cout << AsText(relay_module, /*show_meta_data=*/false) << std::endl;
+    // std::cout << "before optimization" << std::endl;
+    // std::cin >> x;
+    
+    DumpIR(relay_module, "relay_module.txt");
 
     relay_module = OptimizeImpl(std::move(relay_module));
 
-    std::cout << AsText(relay_module, /*show_meta_data=*/false) << std::endl;
-    std::cout << "after optimization" << std::endl;
-    std::cin >> x;
+    DumpIR(relay_module, "relay_module_opt.txt");
+
+    // std::cout << AsText(relay_module, /*show_meta_data=*/false) << std::endl;
+    // std::cout << "after optimization" << std::endl;
+    // std::cin >> x;
     
     // Get the updated function and new IRModule to build.
     // Instead of recreating the IRModule, we should look at the differences between this and the
@@ -417,6 +432,8 @@ class RelayBuildModule : public runtime::ModuleNode {
     Function func = Downcast<Function>(relay_module->Lookup("main"));
     IRModule func_module = WithAttrs(IRModule::FromExpr(func), {{tvm::attr::kExecutor, executor_},
                                                                 {tvm::attr::kRuntime, runtime_}});
+
+    DumpIR(func_module, "func_module.txt");
 
     // Generate code for the updated function.
     executor_codegen_ = MakeExecutorCodegen(executor_->name);
@@ -427,13 +444,17 @@ class RelayBuildModule : public runtime::ModuleNode {
 
     auto lowered_funcs = executor_codegen_->GetIRModule();
 
-    std::cout << AsText(lowered_funcs, /*show_meta_data=*/false) << std::endl;
+    DumpIR(lowered_funcs, "tir_origin.txt");
 
     // No need to build for external functions.
     Target ext_dev("ext_dev");
     if (lowered_funcs.find(ext_dev) != lowered_funcs.end()) {
       lowered_funcs.Set(ext_dev, IRModule());
     }
+
+    DumpIR(lowered_funcs, "tir.txt");
+
+    // std::cout << AsText(lowered_funcs, /*show_meta_data=*/false) << std::endl;
 
     const Target& host_target = config_->host_virtual_device->target;
     const runtime::PackedFunc* pf = runtime::Registry::Get("codegen.LLVMModuleCreate");
