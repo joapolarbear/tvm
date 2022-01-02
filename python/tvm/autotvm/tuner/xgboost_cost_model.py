@@ -177,6 +177,12 @@ class XGBoostCostModel(CostModel):
         self._reset_pool(self.space, self.target, self.task)
 
         x_train = self._get_feature(xs)
+
+        # TODO(huhanpeng): debug for feature engineering
+        # print(xs)
+        # print(x_train)
+        # exit(0)
+        
         y_train = np.array(ys)
         y_max = np.max(y_train)
         y_train = y_train / max(y_max, 1e-8)

@@ -275,6 +275,9 @@ class ModelBasedTuner(Tuner):
             # to also use this update function to resume tuning progress in
             # case of interruption.
             self.visited.add(index)
+        
+        # TODO (huhanpeng): debug, for featrue engineering
+        # self.cost_model.fit(self.xs, self.ys, self.plan_size)
 
         # if we have enough new training samples
         if len(self.xs) >= self.plan_size * (self.train_ct + 1) and self.flops_max > 1e-6:
