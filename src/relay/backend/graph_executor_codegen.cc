@@ -290,6 +290,9 @@ class GraphExecutorCodegen : public backend::MemoizedExprTranslator<std::vector<
     // This is the point where we separate the functions in the module by target
     ret.lowered_funcs = tec::GetPerTargetModules(lowered_mod);
     ret.external_mods = external_modules.value();
+
+    ret.lowered_mod = lowered_mod;
+
     return ret;
   }
 
@@ -701,6 +704,10 @@ class GraphExecutorCodegenModule : public runtime::ModuleNode {
     } else if (name == "get_function_metadata") {
       return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
         *rv = this->output_.function_metadata;
+      });
+    } else if (name == "get_lowered_mod") {
+      return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
+        *rv = this->output_.lowered_mod;
       });
     } else {
       return PackedFunc([](TVMArgs args, TVMRetValue* rv) {});

@@ -135,6 +135,7 @@ class ScheduleBuilder : public backend::MemoizedExprTranslator<Array<te::Tensor>
     readable_name_stream_ << "fused";
     auto outputs = this->VisitExpr(relay_func->body);
     auto candidate_name = readable_name_stream_.str();
+    // std::cout << candidate_name << std::endl;
     constexpr static size_t kMaxFuncNameLength = 80;
     // WARNING: Please make sure to also update TVM_CRT_MAX_STRLEN_FUNCTION_NAME
     //          whenever the value of kMaxFuncNameLength changes

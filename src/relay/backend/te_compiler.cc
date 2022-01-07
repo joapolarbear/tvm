@@ -67,6 +67,7 @@ class TECompilerImpl : public TECompilerNode {
     // Make sure we don't collide with any existing globals in the module.
     if (opt_mod) {
       for (const auto& kv : opt_mod.value()->functions) {
+        // std::cout << "TECompilerImpl " << kv.first->name_hint << std::endl;
         name_map_[kv.first->name_hint] = 1;
       }
     }
@@ -262,12 +263,15 @@ class TECompilerImpl : public TECompilerNode {
     CCacheValue value;
     auto it = cache_.find(key);
     if (it != cache_.end()) {
+      // std::cout << "already lowered to name:" 
+      //       << it->second->cached_func->prim_fn_var->name_hint << std::endl;
       VLOG(1) << "already lowered to name:" << std::endl
               << PrettyPrint(it->second->cached_func->prim_fn_var);
       it->second->use_count += 1;
       if (it->second->cached_func.defined()) return it->second;
       value = it->second;
     } else {
+      // std::cout << "not lowered" << std::endl;
       value = CCacheValue(make_object<CCacheValueNode>());
       value->use_count = 1;
       cache_[key] = value;
@@ -309,7 +313,9 @@ class TECompilerImpl : public TECompilerNode {
     ICHECK(!value->cached_func.defined());
     value->cached_func = PrimFuncFor(key->source_func, key->target, [&](std::string name) {
       auto mangled = mangle_fn(name);
-      return GetUniqueName(mangled, &name_map_);
+      auto unique_name = GetUniqueName(mangled, &name_map_);
+      // std::cout << "Create UniqueName " << unique_name << std::endl;
+      return unique_name;
     });
 
     if (value->cached_func->prim_func.defined()) {
@@ -687,6 +693,7 @@ class LowerTensorExprMutator : public DeviceAwareExprMutator {
     // Look for (possibly indirect) calls to primitives.
     BaseFunc primitive_func = ResolveToPrimitive(call_node->op);
     if (!primitive_func.defined()) {
+      // std::cout << "primitive_func not defined()" << std::endl;
       // Not a call to a primitive function we need to rewrite.
       if (const auto* function_node = call_node->op.as<FunctionNode>()) {
         process_fn_(GetRef<Function>(function_node));
@@ -706,6 +713,7 @@ class LowerTensorExprMutator : public DeviceAwareExprMutator {
     if (const auto* function_node = primitive_func.as<FunctionNode>()) {
       DeviceCopyProps device_copy_props = GetDeviceCopyProps(function_node->body);
       if (device_copy_props.body.defined()) {
+        // std::cout << "device_copy_props defined()" << std::endl;
         ICHECK_EQ(new_args.size(), 1);
         return DeviceCopy(new_args[0], device_copy_props.src_virtual_device,
                           device_copy_props.dst_virtual_device);
@@ -715,6 +723,7 @@ class LowerTensorExprMutator : public DeviceAwareExprMutator {
     // Special case: If already lowered by other means then so we don't need to mutate
     // the call but we do need to mutate the arguments
     if (const auto* prim_func_node = primitive_func.as<tir::PrimFuncNode>()) {
+      // std::cout << "already lowered" << std::endl;
       // Function should already be Target annotated by this point
       // but the TE Compiler metadata is still needed for the callback
       // TODO(Mousius) - Robustify this to not assume we're in the GlobalVar for Target Hooks

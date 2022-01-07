@@ -101,6 +101,10 @@ struct ExecutorCodegen {
     return CallFunc<Map<Target, IRModule>>("get_irmodule", nullptr);
   }
 
+  IRModule GetLoweredMod() {
+    return CallFunc<IRModule>("get_lowered_mod", nullptr);
+  }
+
   Array<String> ListDevices() { return CallFunc<Array<String>>("get_devices"); }
 
   runtime::Metadata GetMetadata() { return CallFunc<runtime::Metadata>("get_metadata"); }
@@ -392,16 +396,6 @@ class RelayBuildModule : public runtime::ModuleNode {
     return relay_module;
   }
 
-  void DumpIR(const ObjectRef& object, const std::string filename) {
-    char* dump_path = getenv("TVM_DUMP_TIR_DIR");
-    if (dump_path) {
-      std::string full_path = std::string(dump_path) + "/" + filename;
-      std::ofstream ofs(full_path, std::ofstream::trunc);
-      CHECK(ofs.good()) << "ValueError: Cannot create new file: " << full_path;
-      ofs << AsText(object, /*show_meta_data=*/false);
-      ofs.close();
-    }
-  }
   /*!
    * \brief Compile a Relay IR module to runtime module.
    *
@@ -444,6 +438,8 @@ class RelayBuildModule : public runtime::ModuleNode {
 
     auto lowered_funcs = executor_codegen_->GetIRModule();
 
+    // auto lowered_mod = executor_codegen_->GetLoweredMod();
+    // DumpIR(lowered_mod, "lowered_mod.txt");
     DumpIR(lowered_funcs, "tir_origin.txt");
 
     // No need to build for external functions.

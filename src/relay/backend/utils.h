@@ -50,6 +50,44 @@ namespace tec {
 class TECompiler;
 }
 
+/*!
+ * \brief Dump IRModule.
+ */
+inline void DumpIR(const ObjectRef& object, const std::string filename) {
+  char* dump_path = getenv("TVM_DUMP_TIR_DIR");
+  if (dump_path) {
+    std::string full_path = std::string(dump_path) + "/" + filename;
+    std::ofstream ofs(full_path, std::ofstream::trunc);
+    CHECK(ofs.good()) << "ValueError: Cannot create new file: " << full_path;
+    ofs << AsText(object, /*show_meta_data=*/false);
+    ofs.close();
+  }
+}
+
+/*!
+ * \brief traverse the function in an IRModule.
+ */
+inline void DebugIR(const IRModule& mod) {
+  for (const auto& kv : mod->functions) {
+    const GlobalVar& var = kv.first;
+    std::cout << "DebugIR: " << var->name_hint << std::endl;
+  }
+}
+
+// inline void DebugIR2(const IRModule& mod) {
+//   for (const auto& kv : mod->functions) {
+//     if (const auto* function_node = AsOptimizableFunctionNode(kv.second)) {
+//       auto call_node = GetRef<Function>(function_node);
+      
+//       if (call_node->op.as<OpNode>()) {
+//         Op op = Downcast<Op>(call_node->op);
+//         std::cout << op->name << std::endl;
+//       }
+//     }
+//   }
+// }
+
+
 namespace backend {
 using Pass = tvm::transform::Pass;
 
@@ -148,6 +186,7 @@ struct LoweredOutput {
   Map<String, FunctionInfo> function_metadata;
   std::unordered_map<std::string, std::pair<int, const tvm::runtime::NDArray>> params;
   runtime::Metadata metadata;
+  IRModule lowered_mod;
 };
 
 /*!
