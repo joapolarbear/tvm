@@ -595,7 +595,7 @@ void GetCurveSampleFeature(Stmt stmt, int sample_n, std::vector<float>* ret_feat
     sample_curve(count, top_down, 1, &tmp_feature);
     sample_curve(top_down, count, 1, &tmp_feature);
 
-    all_feature->emplace_back(tmp_feature);
+    all_feature.emplace_back(tmp_feature);
   }
 
   for (int i = 0; i < all_feature.size(); i++) {
