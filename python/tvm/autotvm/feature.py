@@ -54,6 +54,9 @@ try:
     _get_buffer_curve_sample_flatten = tvm._ffi.get_global_func(
         "autotvm.feature.GetCurveSampleFeatureFlatten"
     )
+    _get_buffer_curve_sample = tvm._ffi.get_global_func(
+        "autotvm.feature.GetCurveSampleFeature"
+    )
     _get_itervar_feature = tvm._ffi.get_global_func("autotvm.feature.GetItervarFeature")
     _get_itervar_feature_flatten = tvm._ffi.get_global_func(
         "autotvm.feature.GetItervarFeatureFlatten"
@@ -65,7 +68,7 @@ except ValueError as e:
 
     _get_buffer_curve_sample_flatten = (
         _get_itervar_feature
-    ) = _get_itervar_feature_flatten = raise_error
+    ) = _get_buffer_curve_sample = _get_itervar_feature_flatten = raise_error
 
 
 def get_itervar_feature(sch, args, take_log=False):
@@ -211,5 +214,27 @@ def get_buffer_curve_sample_flatten(sch, args, sample_n=30):
     """
     stmt = ana_lower(sch, args, simple_mode=True)
     feas = _get_buffer_curve_sample_flatten(stmt, sample_n, False)
+    feas = struct.unpack("%df" % (len(feas) // 4), feas)
+    return feas
+
+def get_buffer_curve_sample(sch, args, sample_n=30):
+    """
+    Get flatten curve sample feature (relation feature)
+
+    Parameters
+    ----------
+    sch: tvm.te.schedule.Schedule
+    args: Array of te.tensor.Tensor
+        the buffer args for lower
+    sample_n: int
+        number of sample points along one dimension
+
+    Returns
+    -------
+    flatten_feature: np.ndarray
+        one-dimensional vector
+    """
+    stmt = ana_lower(sch, args, simple_mode=True)
+    feas = _get_buffer_curve_sample(stmt, sample_n, False)
     feas = struct.unpack("%df" % (len(feas) // 4), feas)
     return feas

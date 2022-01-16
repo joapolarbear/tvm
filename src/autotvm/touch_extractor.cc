@@ -480,6 +480,133 @@ void GetCurveSampleFeatureFlatten(Stmt stmt, int sample_n, std::vector<float>* r
   }
 }
 
+/*!
+ * \brief Get curve sample feature (relation feature) and flatten them into a one-dimensional
+ * vector. \param stmt The statement to be extracted \param sample_n The number of points used for
+ * sampling a curve (along one dimension) \param ret_feature The buffer where the return value is
+ * stored
+ *
+ * Similar to GetCurveSampleFeatureFlatten, but return the un-flattened version
+ */
+void GetCurveSampleFeature(Stmt stmt, int sample_n, std::vector<float>* ret_feature) {
+  // extract touch feature
+  TouchExtractor touch_ext;
+  touch_ext.Analyze(stmt);
+
+  // sort according to order
+  std::vector<Var> vars;
+  for (auto kv : touch_ext.itervar_map) {
+    vars.push_back(kv.first);
+  }
+  std::sort(vars.begin(), vars.end(), [&](const Var& lhs, const Var& rhs) -> bool {
+    return touch_ext.itervar_map[lhs].order < touch_ext.itervar_map[rhs].order;
+  });
+
+  int max_depth = 0;
+  std::map<TouchedBuffer, std::vector<double> > reuse_curve;
+  std::map<TouchedBuffer, std::vector<double> > count_curve;
+  std::map<TouchedBuffer, std::vector<double> > topdown_curve;
+  std::map<TouchedBuffer, std::vector<double> > bottomup_curve;
+  std::set<TouchedBuffer> innermost_buffers;
+  std::set<std::string> added;
+
+  // find maximum depth of loop nest
+  for (auto var : vars) {
+    ItervarFeature& fea = touch_ext.itervar_map[var];
+    max_depth = std::max(max_depth, fea.nest_level);
+  }
+
+  // mark inner most buffer
+  for (auto iter = vars.rbegin(); iter != vars.rend(); iter++) {
+    auto var = *iter;
+    ItervarFeature& fea = touch_ext.itervar_map[var];
+    if (fea.nest_level == max_depth) {
+      for (auto kv : fea.touch_feature) {
+        // delete buffer no (e.g. 'A_0' -> 'A', 'A_1' -> 'A')
+        std::string raw_name = kv.first.substr(0, kv.first.rfind("_"));
+
+        // delete memory scope (e.g. 'A.local' -> 'A', 'A.shared' -> 'A')
+        size_t pos = raw_name.find(".");
+        if (pos < kv.first.size()) raw_name = raw_name.substr(0, pos);
+
+        // If there are multiple innermost buffers that are derived from a same raw buffer
+        // We only record the last occurrence (note the `iter` is in reverse order)
+        // e.g. `A.local`, `A.shared` are derived from `A`, if they all occurred at the inner most
+        // level, we will only record the last occurrence,
+        if (added.find(raw_name) == added.end()) {
+          innermost_buffers.insert(kv.first);
+          added.insert(raw_name);
+        }
+      }
+    }
+  }
+
+  // pad the first point (zero) for all curves
+  for (auto buf : innermost_buffers) {
+    reuse_curve[buf].push_back(0);
+    count_curve[buf].push_back(0);
+    topdown_curve[buf].push_back(0);
+    bottomup_curve[buf].push_back(0);
+  }
+
+  // extract curves
+  for (auto var : vars) {
+    ItervarFeature& fea = touch_ext.itervar_map[var];
+    for (auto kv : fea.touch_feature) {
+      if (innermost_buffers.find(kv.first) != innermost_buffers.end()) {
+        reuse_curve[kv.first].emplace_back(std::log(kv.second.reuse) / std::log(2));
+        count_curve[kv.first].emplace_back(std::log(kv.second.count) / std::log(2));
+        topdown_curve[kv.first].emplace_back(std::log(fea.topdown_product) / std::log(2));
+        bottomup_curve[kv.first].emplace_back(std::log(fea.bottomup_product) / std::log(2));
+      }
+    }
+  }
+
+  // sample relation in the curve
+  auto sample_curve = [&](const std::vector<double>& x, const std::vector<double>& y, double weight,
+                          std::vector<float>* tmp_feature) {
+    for (int i = 0; i < sample_n; i++) {
+      double xx = i * weight;
+      for (int j = static_cast<int>(x.size()) - 1; j >= 0; j--) {
+        if (xx > x[j] - 1e-6) {
+          tmp_feature->emplace_back(y[j]);
+          tmp_feature->emplace_back(xx - x[j]);
+          break;
+        }
+      }
+    }
+  };
+
+  // serialize to frontend
+  std::vector<std::vector<float>> all_feature;
+  for (auto k : innermost_buffers) {
+    std::vector<float> tmp_feature;
+
+    std::vector<double>& count = count_curve[k];
+    std::vector<double>& reuse = reuse_curve[k];
+    std::vector<double>& top_down = topdown_curve[k];
+
+    std::sort(count.begin(), count.end());
+    std::sort(reuse.begin(), reuse.end());
+    std::sort(top_down.begin(), top_down.end());
+
+    sample_curve(count, reuse, 1, &tmp_feature);
+    sample_curve(reuse, count, 1, &tmp_feature);
+    sample_curve(count, top_down, 1, &tmp_feature);
+    sample_curve(top_down, count, 1, &tmp_feature);
+
+    all_feature->emplace_back(tmp_feature);
+  }
+
+  for (int i = 0; i < all_feature.size(); i++) {
+    for (int j = 0; j < all_feature[i].size(); j++) {
+      if (i == 0) ret_feature->emplace_back(all_feature[i][j]);
+      else *ret_feature[j] += all_feature[i][j];
+    }
+  }
+  
+}
+
 // register API for front end
 TVM_REGISTER_GLOBAL("autotvm.feature.GetItervarFeature")
     .set_body([](TVMArgs args, TVMRetValue* ret) {
@@ -513,6 +640,20 @@ TVM_REGISTER_GLOBAL("autotvm.feature.GetCurveSampleFeatureFlatten")
       std::vector<float> ret_feature;
 
       GetCurveSampleFeatureFlatten(stmt, sample_n, &ret_feature);
+
+      TVMByteArray arr;
+      arr.size = sizeof(float) * ret_feature.size();
+      arr.data = reinterpret_cast<char*>(ret_feature.data());
+      *ret = arr;
+    });
+
+TVM_REGISTER_GLOBAL("autotvm.feature.GetCurveSampleFeature")
+    .set_body([](TVMArgs args, TVMRetValue* ret) {
+      Stmt stmt = args[0];
+      int sample_n = args[1];
+      std::vector<float> ret_feature;
+
+      GetCurveSampleFeature(stmt, sample_n, &ret_feature);
 
       TVMByteArray arr;
       arr.size = sizeof(float) * ret_feature.size();

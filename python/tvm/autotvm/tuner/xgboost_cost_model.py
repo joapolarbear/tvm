@@ -130,6 +130,10 @@ class XGBoostCostModel(CostModel):
             self.feature_extract_func = _extract_knob_feature_index
         elif feature_type == "curve":
             self.feature_extract_func = _extract_curve_feature_index
+        elif feature_type == "itervar_m":
+            self.feature_extract_func = _extract_itervar_feature_index_multi_dim
+        elif feature_type == "curve_sum":
+            self.feature_extra_func = _extract_curve_feature_index_sum
         else:
             raise RuntimeError("Invalid feature type " + feature_type)
 
@@ -377,6 +381,38 @@ def _extract_itervar_feature_index(args):
     except Exception:  # pylint: disable=broad-except
         return None
 
+def _extract_itervar_feature_index_multi_dim(args):
+    """extract iteration var feature for an index in extract_space"""
+    try:
+        config = _extract_space.get(args)
+        with _extract_target:
+            sch, fargs = _extract_task.instantiate(config)
+
+        fea = feature.get_itervar_feature(sch, fargs, take_log=True)
+
+        ### flatten the feature
+        attr_list = []
+        arith_list = []
+        remain_list = []
+
+        for axis in fea:
+            ### for different iteration vars
+            attr_list.append(axis[1:][0])
+            arith_list.append(axis[1:][1])
+
+            tmp = np.sum([pair[1:] for pair in axis[1:][2:]], axis=0)
+            remain_list.append(tmp)
+
+        ### sum across iteration vars
+        return np.concatenate((
+            np.sum(attr_list, axis=0),
+            np.sum(arith_list, axis=0),
+            np.sum(remain_list, axis=0)))
+
+        # fea = np.concatenate((fea, list(config.get_other_option().values())))
+
+    except Exception:  # pylint: disable=broad-except
+        return None
 
 def _extract_itervar_feature_log(arg):
     """extract iteration var feature for log items"""
@@ -459,6 +495,20 @@ def _extract_curve_feature_log(arg):
     except Exception:  # pylint: disable=broad-except
         return None
 
+
+def _extract_curve_feature_index_sum(args):
+    """extract sampled curve feature for an index in extract_space"""
+    try:
+
+        config = _extract_space.get(args)
+        with _extract_target:
+            sch, fargs = _extract_task.instantiate(config)
+
+        fea = feature.get_buffer_curve_sample(sch, fargs, sample_n=20)
+        fea = np.concatenate((fea, list(config.get_other_option().values())))
+        return np.array(fea)
+    except Exception:  # pylint: disable=broad-except
+        return None
 
 def custom_callback(
     stopping_rounds, metric, fevals, evals=(), log_file=None, maximize=False, verbose_eval=True
