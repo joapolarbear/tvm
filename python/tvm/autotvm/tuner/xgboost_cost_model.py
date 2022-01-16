@@ -133,7 +133,7 @@ class XGBoostCostModel(CostModel):
         elif feature_type == "itervar_m":
             self.feature_extract_func = _extract_itervar_feature_index_multi_dim
         elif feature_type == "curve_sum":
-            self.feature_extra_func = _extract_curve_feature_index_sum
+            self.feature_extract_func = _extract_curve_feature_index_sum
         else:
             raise RuntimeError("Invalid feature type " + feature_type)
 
