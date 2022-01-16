@@ -601,10 +601,10 @@ void GetCurveSampleFeature(Stmt stmt, int sample_n, std::vector<float>* ret_feat
   for (int i = 0; i < all_feature.size(); i++) {
     for (int j = 0; j < all_feature[i].size(); j++) {
       if (i == 0) ret_feature->emplace_back(all_feature[i][j]);
-      else *ret_feature[j] += all_feature[i][j];
+      else (*ret_feature)[j] += all_feature[i][j];
     }
   }
-  
+
 }
 
 // register API for front end
