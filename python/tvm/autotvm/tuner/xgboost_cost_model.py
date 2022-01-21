@@ -505,7 +505,7 @@ def _extract_curve_feature_index_sum(args):
             sch, fargs = _extract_task.instantiate(config)
 
         fea = feature.get_buffer_curve_sample(sch, fargs, sample_n=20)
-        fea = np.concatenate((fea, list(config.get_other_option().values())))
+        # fea = np.concatenate((fea, list(config.get_other_option().values())))
         return np.array(fea)
     except Exception:  # pylint: disable=broad-except
         return None
