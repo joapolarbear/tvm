@@ -138,7 +138,7 @@ class LocalBuilder(Builder):
 
             for future in futures:
                 try:
-                    res = future.result()
+                    res, ir_by_target = future.result()
                     if res.error is not None:
                         # instantiation error
                         if isinstance(res.error, InstantiationError):
@@ -182,7 +182,7 @@ class LocalBuilder(Builder):
                         time.time(),
                     )
 
-                results.append(res)
+                results.append((res, ir_by_target))
 
         return results
 
@@ -336,7 +336,7 @@ class RPCRunner(Runner):
 
         for i in range(0, len(measure_inputs), self.n_parallel):
             futures = []
-            for measure_inp, build_res in zip(
+            for measure_inp, (build_res, ir_by_target) in zip(
                 measure_inputs[i : i + self.n_parallel], build_results[i : i + self.n_parallel]
             ):
                 module_loader = (
@@ -362,13 +362,14 @@ class RPCRunner(Runner):
             for future in futures:
                 try:
                     res = future.result()
-                    results.append(res)
+                    results.append((res, ir_by_target))
                 except Exception as ex:  # pylint: disable=broad-except
-                    results.append(
+                    results.append((
                         MeasureResult(
                             (str(ex),), MeasureErrorNo.RUN_TIMEOUT, self.timeout, time.time()
-                        )
-                    )
+                        ),
+                    ir_by_target
+                    ))
 
         return results
 
@@ -530,12 +531,14 @@ class _WrappedBuildFunc:
             The path of temporary directory to export generated library
         """
         tic = time.time()
+        ir_by_target = None
         try:
             filename = os.path.join(
                 tmp_dir, "tmp_func_%0x.%s" % (getrandbits(64), self.build_func.output_format)
             )
             # TODO(tvm-team) consider linline _build_func_common
             func, arg_info = _build_func_common(measure_input, self.runtime, **kwargs)
+            ir_by_target = func.ir_module_by_target
             if self.build_func.output_format == ".model-library-format":
                 # Late import to preserve autoTVM with USE_MICRO OFF
                 try:
@@ -547,7 +550,7 @@ class _WrappedBuildFunc:
                 func.export_library(filename, self.build_func)
         except Exception as e:  # pylint: disable=broad-except
             return BuildResult(None, None, e, time.time() - tic)
-        return BuildResult(filename, arg_info, None, time.time() - tic)
+        return BuildResult(filename, arg_info, None, time.time() - tic), ir_by_target
 
 
 ModuleLoader = typing.Callable[
