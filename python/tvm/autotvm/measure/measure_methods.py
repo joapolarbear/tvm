@@ -137,6 +137,7 @@ class LocalBuilder(Builder):
                 futures.append(ret)
 
             for future in futures:
+                ir_by_target = None
                 try:
                     res, ir_by_target = future.result()
                     if res.error is not None:
@@ -549,7 +550,7 @@ class _WrappedBuildFunc:
             else:
                 func.export_library(filename, self.build_func)
         except Exception as e:  # pylint: disable=broad-except
-            return BuildResult(None, None, e, time.time() - tic)
+            return BuildResult(None, None, e, time.time() - tic), ir_by_target
         return BuildResult(filename, arg_info, None, time.time() - tic), ir_by_target
 
 
