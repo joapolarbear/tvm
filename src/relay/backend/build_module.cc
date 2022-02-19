@@ -410,11 +410,11 @@ class RelayBuildModule : public runtime::ModuleNode {
     // std::cout << "before optimization" << std::endl;
     // std::cin >> x;
     
-    DumpIR(relay_module, "relay_module.txt");
+    // DumpIR(relay_module, "relay_module.txt");
 
     relay_module = OptimizeImpl(std::move(relay_module));
 
-    DumpIR(relay_module, "relay_module_opt.txt");
+    // DumpIR(relay_module, "relay_module_opt.txt");
 
     // std::cout << AsText(relay_module, /*show_meta_data=*/false) << std::endl;
     // std::cout << "after optimization" << std::endl;
@@ -427,7 +427,7 @@ class RelayBuildModule : public runtime::ModuleNode {
     IRModule func_module = WithAttrs(IRModule::FromExpr(func), {{tvm::attr::kExecutor, executor_},
                                                                 {tvm::attr::kRuntime, runtime_}});
 
-    DumpIR(func_module, "func_module.txt");
+    // DumpIR(func_module, "func_module.txt");
 
     // Generate code for the updated function.
     executor_codegen_ = MakeExecutorCodegen(executor_->name);
@@ -440,7 +440,7 @@ class RelayBuildModule : public runtime::ModuleNode {
 
     // auto lowered_mod = executor_codegen_->GetLoweredMod();
     // DumpIR(lowered_mod, "lowered_mod.txt");
-    DumpIR(lowered_funcs, "tir_origin.txt");
+    // DumpIR(lowered_funcs, "tir_origin.txt");
 
     // No need to build for external functions.
     Target ext_dev("ext_dev");
