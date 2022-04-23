@@ -29,6 +29,7 @@ from . import search_task
 from . import task_scheduler
 from . import utils
 from . import workload_registry
+from . import dataset
 
 # Shortcut
 from .compute_dag import ComputeDAG, LayoutRewriteOption, get_shape_from_rewritten_layout
