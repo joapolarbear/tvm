@@ -50,7 +50,7 @@ def test_save_load_out():
 
         # verification
         with vta.build_config():
-            m = vta.build(s, [x, y], "ext_dev", env.target_host)
+            m = vta.build(s, [x, y], tvm.target.Target("ext_dev", host=env.target_host))
 
         if not remote:
             return
@@ -70,7 +70,7 @@ def test_save_load_out():
 
         f(x_nd, y_nd)
 
-        np.testing.assert_equal(y_np, y_nd.asnumpy())
+        np.testing.assert_equal(y_np, y_nd.numpy())
 
         if env.TARGET in ["sim", "tsim"]:
             sim_stats = simulator.stats()
@@ -121,7 +121,7 @@ def test_padded_load():
             s[y].pragma(y.op.axis[0], env.dma_copy)
             # build
             with vta.build_config():
-                mod = vta.build(s, [x, y], "ext_dev", env.target_host)
+                mod = vta.build(s, [x, y], tvm.target.Target("ext_dev", host=env.target_host))
 
             if not remote:
                 return
@@ -149,7 +149,7 @@ def test_padded_load():
 
             f(x_nd, y_nd)
 
-            np.testing.assert_equal(y_np, y_nd.asnumpy())
+            np.testing.assert_equal(y_np, y_nd.numpy())
 
             if env.TARGET in ["sim", "tsim"]:
                 sim_stats = simulator.stats()
@@ -208,7 +208,7 @@ def test_gemm():
             return
 
         def verify(s, name=None):
-            mod = vta.build(s, [x, w, y], "ext_dev", env.target_host)
+            mod = vta.build(s, [x, w, y], tvm.target.Target("ext_dev", host=env.target_host))
             temp = utils.tempdir()
             mod.save(temp.relpath("gemm.o"))
             remote.upload(temp.relpath("gemm.o"))
@@ -240,7 +240,7 @@ def test_gemm():
 
             f(x_nd, w_nd, y_nd)
 
-            np.testing.assert_equal(y_np, y_nd.asnumpy())
+            np.testing.assert_equal(y_np, y_nd.numpy())
 
             if env.TARGET in ["sim", "tsim"]:
                 sim_stats = simulator.stats()
@@ -368,9 +368,11 @@ def test_alu():
             # build
             with vta.build_config():
                 if use_imm:
-                    mod = vta.build(s, [a, res], "ext_dev", env.target_host)
+                    mod = vta.build(s, [a, res], tvm.target.Target("ext_dev", host=env.target_host))
                 else:
-                    mod = vta.build(s, [a, b, res], "ext_dev", env.target_host)
+                    mod = vta.build(
+                        s, [a, b, res], tvm.target.Target("ext_dev", host=env.target_host)
+                    )
             temp = utils.tempdir()
             mod.save(temp.relpath("load_act.o"))
             remote.upload(temp.relpath("load_act.o"))
@@ -398,7 +400,7 @@ def test_alu():
                 b_nd = tvm.nd.array(b_np, dev)
                 f(a_nd, b_nd, res_nd)
 
-            np.testing.assert_equal(res_np, res_nd.asnumpy())
+            np.testing.assert_equal(res_np, res_nd.numpy())
 
             if env.TARGET in ["sim", "tsim"]:
                 sim_stats = simulator.stats()
@@ -451,7 +453,7 @@ def test_relu():
         s[res].pragma(res.op.axis[0], env.dma_copy)  # SRAM->DRAM
         # build
         with vta.build_config():
-            mod = vta.build(s, [a, res], "ext_dev", env.target_host)
+            mod = vta.build(s, [a, res], tvm.target.Target("ext_dev", host=env.target_host))
         if not remote:
             return
         temp = utils.tempdir()
@@ -470,7 +472,7 @@ def test_relu():
 
         f(a_nd, res_nd)
 
-        np.testing.assert_equal(res_np, res_nd.asnumpy())
+        np.testing.assert_equal(res_np, res_nd.numpy())
 
         if env.TARGET in ["sim", "tsim"]:
             sim_stats = simulator.stats()
@@ -513,7 +515,7 @@ def test_shift_and_scale():
         s[res_scale].pragma(res_scale.op.axis[0], env.alu)  # compute
         s[res].pragma(res.op.axis[0], env.dma_copy)  # SRAM->DRAM
         # build
-        mod = vta.build(s, [a, res], "ext_dev", env.target_host)
+        mod = vta.build(s, [a, res], tvm.target.Target("ext_dev", host=env.target_host))
         if not remote:
             return
         temp = utils.tempdir()
@@ -533,7 +535,7 @@ def test_shift_and_scale():
 
         f(a_nd, res_nd)
 
-        np.testing.assert_equal(res_np, res_nd.asnumpy())
+        np.testing.assert_equal(res_np, res_nd.numpy())
 
         if env.TARGET in ["sim", "tsim"]:
             sim_stats = simulator.stats()
@@ -550,7 +552,7 @@ def test_runtime_array():
         dev = remote.ext_dev(0)
         x_np = np.random.randint(1, 10, size=(n, n, env.BATCH, env.BLOCK_OUT)).astype("int8")
         x_nd = tvm.nd.array(x_np, dev)
-        np.testing.assert_equal(x_np, x_nd.asnumpy())
+        np.testing.assert_equal(x_np, x_nd.numpy())
 
     vta.testing.run(_run)
 

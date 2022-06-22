@@ -77,10 +77,19 @@ VerilatorProfiler* VerilatorProfiler::ThreadLocal() {
 }
 
 VerilatorRuntime::~VerilatorRuntime() {
+  VLOG(0) << "destroying verilator runtime";
+  if (lib_ == nullptr) {
+    // Never initialized. This can happen if the runtime was created during compilation of
+    // a BYOC function but the resulting runtime module was never invoked.
+    return;
+  }
   auto dealloc = reinterpret_cast<VerilatorDeallocFunc>(lib_->GetSymbol("VerilatorDealloc"));
   ICHECK(dealloc != nullptr);
+  ICHECK(device_ != nullptr);
   dealloc(device_);
-  delete lib_;
+  device_ = nullptr;
+  lib_->~VerilatorLibrary();
+  lib_ = nullptr;
 }
 
 void VerilatorRuntime::SetLibrary(const std::string& lib_path) { lib_path_ = lib_path; }
@@ -92,6 +101,7 @@ void VerilatorRuntime::EnableProfiler() { prof_enable_ = true; }
 void VerilatorRuntime::SetProfilerCycleCounterId(const int id) { prof_cycle_counter_id_ = id; }
 
 void VerilatorRuntime::Init(const Array<NDArray>& consts) {
+  VLOG(0) << "initializing verilator runtime";
   lib_ = new VerilatorLibrary();
   lib_->Load(lib_path_);
   auto alloc = reinterpret_cast<VerilatorAllocFunc>(lib_->GetSymbol("VerilatorAlloc"));
@@ -100,7 +110,6 @@ void VerilatorRuntime::Init(const Array<NDArray>& consts) {
   ICHECK(reset != nullptr);
   read_ = reinterpret_cast<VerilatorReadFunc>(lib_->GetSymbol("VerilatorRead"));
   ICHECK(read_ != nullptr);
-  add_op_ = reinterpret_cast<VerilatorAddFunc>(lib_->GetSymbol("verilator_add"));
 
   // alloc verilator device
   device_ = alloc();
@@ -108,7 +117,7 @@ void VerilatorRuntime::Init(const Array<NDArray>& consts) {
   // enable profiler
   if (prof_enable_) prof_ = VerilatorProfiler::ThreadLocal();
 
-  // reset verilator device.
+  // reset verilator device
   reset(device_, reset_cycles_);
 
   CHECK_EQ(consts.size(), const_idx_.size())
@@ -136,11 +145,17 @@ void VerilatorRuntime::Run() {
     if (node.GetOpType() == "kernel") {
       CHECK_EQ(node.GetOpType(), "kernel");
       auto op_name = node.GetOpName();
+      auto entry = node.GetInputs()[0];
+      auto shape = node.GetOpShape()[entry.index_];
       if ("add" == op_name) {
-        auto entry = node.GetInputs()[0];
-        auto shape = nodes_[entry.id_].GetOpShape()[entry.index_];
-        ICHECK(add_op_ != nullptr);
-        add_op_(device_, in_ptr[0], in_ptr[1], out_ptr[0], shape[0], shape[1]);
+        auto add = reinterpret_cast<VerilatorAddFunc>(lib_->GetSymbol("verilator_add"));
+        ICHECK(add != nullptr);
+        add(device_, in_ptr[0], in_ptr[1], out_ptr[0], shape[0], shape[1]);
+      } else if ("nn.bias_add" == op_name) {
+        auto bias_add =
+            reinterpret_cast<VerilatorBiasAddFunc>(lib_->GetSymbol("verilator_bias_add"));
+        ICHECK(bias_add != nullptr);
+        bias_add(device_, in_ptr[0], in_ptr[1], out_ptr[0], shape[0], shape[3], shape[1], shape[2]);
       } else {
         LOG(FATAL) << "Unsupported op: " << op_name;
       }

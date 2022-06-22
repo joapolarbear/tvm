@@ -14,31 +14,66 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+import datetime
+import os
+import pathlib
+
 import pytest
 
-import tvm.target.target
+import test_utils
+
+from tvm.contrib.utils import tempdir
 
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--microtvm-platforms",
-        default="host",
-        choices=tvm.target.target.MICRO_SUPPORTED_MODELS.keys(),
-        help=(
-            "Specify a comma-separated list of test models (i.e. as passed to tvm.target.micro()) "
-            "for microTVM tests."
-        ),
+        "--zephyr-board",
+        required=True,
+        choices=test_utils.ZEPHYR_BOARDS.keys(),
+        help=("Zephyr board for test."),
     )
     parser.addoption(
         "--west-cmd", default="west", help="Path to `west` command for flashing device."
     )
+    parser.addoption(
+        "--tvm-debug",
+        action="store_true",
+        default=False,
+        help="If set true, enable a debug session while the test is running. Before running the test, in a separate shell, you should run: <python -m tvm.exec.microtvm_debug_shell>",
+    )
 
 
 def pytest_generate_tests(metafunc):
-    if "platform" in metafunc.fixturenames:
-        metafunc.parametrize("platform", metafunc.config.getoption("microtvm_platforms").split(","))
+    if "board" in metafunc.fixturenames:
+        metafunc.parametrize("board", [metafunc.config.getoption("zephyr_board")])
 
 
 @pytest.fixture
 def west_cmd(request):
     return request.config.getoption("--west-cmd")
+
+
+@pytest.fixture
+def tvm_debug(request):
+    return request.config.getoption("--tvm-debug")
+
+
+@pytest.fixture
+def temp_dir(board):
+    parent_dir = pathlib.Path(os.path.dirname(__file__))
+    filename = os.path.splitext(os.path.basename(__file__))[0]
+    board_workspace = (
+        parent_dir
+        / f"workspace_{filename}_{board}"
+        / datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    )
+    board_workspace_base = str(board_workspace)
+    number = 1
+    while board_workspace.exists():
+        board_workspace = pathlib.Path(board_workspace_base + f"-{number}")
+        number += 1
+
+    if not os.path.exists(board_workspace.parent):
+        os.makedirs(board_workspace.parent)
+
+    return tempdir(board_workspace)

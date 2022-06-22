@@ -24,7 +24,7 @@
 
 #include "./graph_executor_factory.h"
 
-#include <tvm/runtime/container.h>
+#include <tvm/runtime/container/string.h>
 #include <tvm/runtime/device_api.h>
 #include <tvm/runtime/registry.h>
 
@@ -53,6 +53,10 @@ PackedFunc GraphExecutorFactory::GetFunction(
       }
       *rv = this->ExecutorCreate(devices);
     });
+  } else if (name == "get_graph_json") {
+    return PackedFunc(
+        [sptr_to_self, this](TVMArgs args, TVMRetValue* rv) { *rv = this->graph_json_; });
+
   } else if (name == "debug_create") {
     return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
       ICHECK_GE(args.size(), 2);
@@ -205,6 +209,17 @@ TVM_REGISTER_GLOBAL("tvm.graph_executor_factory.create")
 
 TVM_REGISTER_GLOBAL("runtime.module.loadbinary_GraphExecutorFactory")
     .set_body_typed(GraphExecutorFactoryModuleLoadBinary);
+
+Module GraphRuntimeFactoryModuleLoadBinary(void* strm) {
+  LOG(WARNING) << "You are loading a module which was built with GraphRuntimeFactory. "
+               << "GraphRuntime has been renamed to GraphExecutor, and support for loading "
+               << "GraphRuntimeFactory modules will be removed after the next TVM release. "
+               << "Please rebuild the module before then to avoid breakage.";
+  return GraphExecutorFactoryModuleLoadBinary(strm);
+}
+
+TVM_REGISTER_GLOBAL("runtime.module.loadbinary_GraphRuntimeFactory")
+    .set_body_typed(GraphRuntimeFactoryModuleLoadBinary);
 
 }  // namespace runtime
 }  // namespace tvm

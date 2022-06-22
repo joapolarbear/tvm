@@ -27,9 +27,9 @@ TASK = "gemm"
 USE_MANUAL_CODE = False
 
 
-@tvm.register_func
+@tvm.register_func("tvm_callback_cuda_compile", override=True)
 def tvm_callback_cuda_compile(code):
-    ptx = nvcc.compile_cuda(code, target="ptx")
+    ptx = nvcc.compile_cuda(code, target_format="ptx")
     return ptx
 
 
@@ -136,7 +136,7 @@ def test_gemm():
         c = tvm.nd.array(np.zeros((n, m), dtype=C.dtype), dev)
         for i in range(2):
             f(a, b, c)
-        tvm.testing.assert_allclose(c.asnumpy(), np.dot(b_np.T, a_np), rtol=1e-5)
+        tvm.testing.assert_allclose(c.numpy(), np.dot(b_np.T, a_np), rtol=1e-5)
 
         num_flops = 2 * nn * nn * nn
         num_runs = 10

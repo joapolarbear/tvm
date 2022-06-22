@@ -16,9 +16,10 @@
 # under the License.
 import json
 import sys
+
 import pytest
 import tvm
-from tvm.target import cuda, rocm, mali, intel_graphics, arm_cpu, vta, bifrost, Target
+from tvm.target import Target, arm_cpu, bifrost, cuda, intel_graphics, mali, rocm, vta
 
 
 @tvm.target.generic_func
@@ -40,6 +41,23 @@ def rocm_func(data):
 @mygeneric.register("cpu")
 def rocm_func(data):
     return data + 10
+
+
+def test_all_targets_device_type_verify():
+    """Consistency verification for all targets' device type"""
+    all_targets = [tvm.target.Target(t) for t in tvm.target.Target.list_kinds()]
+
+    for tgt in all_targets:
+        # skip target hook
+        relay_to_tir = tgt.get_kind_attr("RelayToTIR")
+        tir_to_runtime = tgt.get_kind_attr("TIRToRuntime")
+        if relay_to_tir is not None or tir_to_runtime is not None:
+            continue
+
+        if tgt.kind.name not in tvm._ffi.runtime_ctypes.Device.STR2MASK:
+            raise KeyError("Cannot find target kind: %s in Device.STR2MASK" % tgt.kind.name)
+
+        assert tgt.kind.device_type == tvm._ffi.runtime_ctypes.Device.STR2MASK[tgt.kind.name]
 
 
 def test_target_dispatch():
@@ -75,6 +93,19 @@ def test_target_string_parse():
     assert tvm.target.arm_cpu().device_name == "arm_cpu"
 
 
+def test_target_string_with_spaces():
+    target = tvm.target.Target(
+        "vulkan -device_name='Name of GPU with spaces' -device_type=discrete"
+    )
+    assert target.attrs["device_name"] == "Name of GPU with spaces"
+    assert target.attrs["device_type"] == "discrete"
+
+    target = tvm.target.Target(str(target))
+
+    assert target.attrs["device_name"] == "Name of GPU with spaces"
+    assert target.attrs["device_type"] == "discrete"
+
+
 def test_target_create():
     targets = [cuda(), rocm(), mali(), intel_graphics(), arm_cpu("rk3399"), vta(), bifrost()]
     for tgt in targets:
@@ -90,7 +121,6 @@ def test_target_config():
         "keys": ["arm_cpu", "cpu"],
         "device": "arm_cpu",
         "libs": ["cblas"],
-        "system-lib": True,
         "mfloat-abi": "hard",
         "mattr": ["+neon", "-avx512f"],
     }
@@ -103,7 +133,6 @@ def test_target_config():
         assert all([key in target.keys for key in ["arm_cpu", "cpu"]])
         assert target.device_name == "arm_cpu"
         assert target.libs == ["cblas"]
-        assert "system-lib" in str(target)
         assert target.attrs["mfloat-abi"] == "hard"
         assert all([attr in target.attrs["mattr"] for attr in ["+neon", "-avx512f"]])
 
@@ -210,17 +239,6 @@ def test_target_host_single_string_with_tag():
     assert tgt.host.attrs["registers_per_block"] == 32768
 
 
-def test_target_host_warning():
-    """
-    Confirm that constructing a target with invalid
-    attributes fails as expected.
-    """
-    with pytest.raises(
-        ValueError, match="Adding a host to a target whose host field has been defined"
-    ):
-        tvm.target.Target("cuda --host nvidia/jetson-nano", "llvm")
-
-
 def test_target_host_merge_0():
     tgt = tvm.target.Target(tvm.target.Target("cuda --host nvidia/jetson-nano"), None)
     assert tgt.kind.name == "cuda"
@@ -240,10 +258,10 @@ def test_target_host_merge_1():
 
 
 def test_target_host_merge_2():
-    with pytest.raises(
-        ValueError, match="Adding a host to a target whose host field has been defined"
-    ):
-        tvm.target.Target(tvm.target.Target("cuda --host llvm"), tvm.target.Target("llvm"))
+    """Test picking the same host is ok."""
+    tgt = tvm.target.Target(tvm.target.Target("cuda --host llvm"), tvm.target.Target("llvm"))
+    assert tgt.kind.name == "cuda"
+    assert tgt.host.kind.name == "llvm"
 
 
 @pytest.mark.skip(reason="Causing infinite loop because of pytest and handle issue")
@@ -297,6 +315,17 @@ def test_check_and_update_host_consist_3():
     assert target.host.kind.name == "llvm"
     assert host.kind.name == "llvm"
     assert target.host == host
+
+
+def test_target_attr_bool_value():
+    target0 = Target("vulkan --supports_float16=True")
+    assert target0.attrs["supports_float16"] == 1
+    target1 = Target("vulkan --supports_float16=true")
+    assert target1.attrs["supports_float16"] == 1
+    target2 = Target("vulkan --supports_float16=False")
+    assert target2.attrs["supports_float16"] == 0
+    target3 = Target("vulkan --supports_float16=false")
+    assert target3.attrs["supports_float16"] == 0
 
 
 if __name__ == "__main__":

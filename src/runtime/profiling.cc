@@ -22,10 +22,15 @@
  * \brief Runtime profiling including timers.
  */
 
+#include <dmlc/json.h>
 #include <tvm/ir/expr.h>
+#include <tvm/runtime/c_backend_api.h>
+#include <tvm/runtime/data_type.h>
 #include <tvm/runtime/packed_func.h>
 #include <tvm/runtime/profiling.h>
+#include <tvm/runtime/threading_backend.h>
 
+#include <algorithm>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
@@ -100,16 +105,37 @@ TVM_REGISTER_GLOBAL("profiling.start_timer").set_body_typed(Timer::Start);
 
 namespace profiling {
 
-void Profiler::Start(const std::vector<Device>& devs) {
-  CHECK(global_timers_.empty()) << "You can only call Start once per Profiler.";
+Profiler::Profiler(std::vector<Device> devs, std::vector<MetricCollector> metric_collectors)
+    : devs_(devs), collectors_(metric_collectors) {
+  is_running_ = false;
+  std::vector<DeviceWrapper> wrapped_devs;
   for (auto dev : devs) {
-    global_timers_.emplace_back(dev, Timer::Start(dev));
+    wrapped_devs.push_back(DeviceWrapper(make_object<DeviceWrapperNode>(dev)));
+  }
+  for (auto& x : collectors_) {
+    x->Init(wrapped_devs);
+  }
+  // reset the thread pool so that PAPI eventset hooks are set in all threads.
+  threading::ResetThreadPool();
+}
+
+void Profiler::Start() {
+  is_running_ = true;
+  for (auto dev : devs_) {
+    StartCall("Total", dev, {});
   }
 }
 
 void Profiler::StartCall(String name, Device dev,
                          std::unordered_map<std::string, ObjectRef> extra_metrics) {
-  in_flight_.push(CallFrame{dev, name, Timer::Start(dev), extra_metrics});
+  std::vector<std::pair<MetricCollector, ObjectRef>> objs;
+  for (auto& collector : collectors_) {
+    ObjectRef obj = collector->Start(dev);
+    if (obj.defined()) {
+      objs.emplace_back(collector, obj);
+    }
+  }
+  in_flight_.push(CallFrame{dev, name, Timer::Start(dev), extra_metrics, objs});
 }
 
 void Profiler::StopCall(std::unordered_map<std::string, ObjectRef> extra_metrics) {
@@ -118,15 +144,67 @@ void Profiler::StopCall(std::unordered_map<std::string, ObjectRef> extra_metrics
   for (auto& p : extra_metrics) {
     cf.extra_metrics[p.first] = p.second;
   }
+  // collect the extra metrics from user defined collectors
+  for (const auto& obj : cf.extra_collectors) {
+    auto collector_metrics = obj.first->Stop(obj.second);
+    for (auto& p : collector_metrics) {
+      cf.extra_metrics[p.first] = p.second;
+    }
+  }
   in_flight_.pop();
   calls_.push_back(cf);
 }
 
 void Profiler::Stop() {
-  // Stop all global timers. We wait to synchronize until we are making the report.
-  for (auto p : global_timers_) {
-    p.second->Stop();
+  is_running_ = false;
+  for (size_t i = 0; i < devs_.size(); i++) {
+    StopCall();
   }
+}
+
+std::vector<int64_t> ToShape(NDArray shape_tensor) {
+  std::vector<int64_t> shape;
+  auto rank = shape_tensor.Shape().size();
+  auto dtype = shape_tensor.DataType();
+
+  // For 0-rank shapes we need to allocate a single scalar.
+  if (rank == 0) {
+    return shape;
+  }
+
+  // Otherwise we should be rank-1, and we will extract the number of dimensions
+  // for the output vector.
+  ICHECK_EQ(rank, 1U) << "shape tensor should be a k-length vector, found " << rank;
+  int64_t ndim = shape_tensor.Shape().at(0);
+  shape.resize(ndim);
+
+  const DLTensor* dl_tensor = shape_tensor.operator->();
+  if (dtype.is_int() && dtype.bits() == 32 && dtype.lanes() == 1) {
+    int32_t* dims = reinterpret_cast<int32_t*>(dl_tensor->data);
+    shape.assign(dims, dims + ndim);
+  } else if (dtype.is_int() && dtype.bits() == 64 && dtype.lanes() == 1) {
+    int64_t* dims = reinterpret_cast<int64_t*>(dl_tensor->data);
+    shape.assign(dims, dims + ndim);
+  } else {
+    LOG(FATAL) << "invalid shape tensor datatype: " << dtype;
+  }
+
+  return shape;
+}
+
+String ShapeString(NDArray shape, DLDataType dtype) { return ShapeString(ToShape(shape), dtype); }
+
+String ShapeString(const std::vector<int64_t>& shape, DLDataType dtype) {
+  std::stringstream sizes;
+  sizes << dtype << "[";
+  for (size_t i = 0; i < shape.size(); i++) {
+    if (i != 0) {
+      sizes << ", ";
+    }
+    sizes << shape[i];
+  }
+  sizes << "]";
+  return String(sizes.str());
 }
 
 String ShapeString(const std::vector<NDArray>& shapes) {
@@ -148,52 +226,281 @@ String ShapeString(const std::vector<NDArray>& shapes) {
   return String(sizes.str());
 }
 
-std::string FormatTable(const std::vector<std::unordered_map<std::string, ObjectRef>>& rows,
-                        std::unordered_set<std::string> hidden_cols = {"Argument Shapes",
-                                                                       "Device"}) {
-  std::unordered_set<std::string> unique_headers;
+String ReportNode::AsCSV() const {
+  // get unique headers
+  std::set<std::string> unique_headers;
 
-  for (auto row : rows) {
+  for (auto row : calls) {
     for (auto p : row) {
       unique_headers.insert(p.first);
     }
   }
 
-  std::vector<std::string> headers = {"Name", "Duration (us)", "Percent"};
+  std::vector<std::string> headers;
+  for (auto x : unique_headers) {
+    headers.push_back(x);
+  }
+
+  std::stringstream s;
+
+  for (size_t i = 0; i < headers.size(); i++) {
+    std::string header = headers[i];
+    s << header;
+    if (i < headers.size() - 1) {
+      s << ",";
+    }
+  }
+  s << std::endl;
+  for (auto row : calls) {
+    for (size_t i = 0; i < headers.size(); i++) {
+      std::string header = headers[i];
+      auto it = row.find(header);
+      if (it != row.end()) {
+        std::string val;
+        if ((*it).second.as<CountNode>()) {
+          s << (*it).second.as<CountNode>()->value;
+        } else if ((*it).second.as<DurationNode>()) {
+          s << (*it).second.as<DurationNode>()->microseconds;
+        } else if ((*it).second.as<PercentNode>()) {
+          s << (*it).second.as<PercentNode>()->percent;
+        } else if ((*it).second.as<StringObj>()) {
+          s << "\"" << Downcast<String>((*it).second) << "\"";
+        }
+      }
+      if (i < headers.size() - 1) {
+        s << ",";
+      }
+    }
+    s << std::endl;
+  }
+  return s.str();
+}
+
+namespace {
+void print_metric(std::ostream& os, ObjectRef o) {
+  if (o.as<StringObj>()) {
+    os << "{\"string\":"
+       << "\"" << Downcast<String>(o) << "\""
+       << "}";
+  } else if (const CountNode* n = o.as<CountNode>()) {
+    os << "{\"count\":" << std::to_string(n->value) << "}";
+  } else if (const DurationNode* n = o.as<DurationNode>()) {
+    os << "{\"microseconds\":" << std::to_string(n->microseconds) << "}";
+  } else if (const PercentNode* n = o.as<PercentNode>()) {
+    os << "{\"percent\":" << std::to_string(n->percent) << "}";
+  } else {
+    LOG(FATAL) << "Unprintable type " << o->GetTypeKey();
+  }
+}
+}  // namespace
+
+String ReportNode::AsJSON() const {
+  std::ostringstream s;
+  // DMLC's JSONWriter does not allow us to write a key value pair without
+  // implementing Write for the value. We want a specific write for the value,
+  // so we would have to implement a custom data structure for each type of
+  // value we want to print. Instead we construct the json by hand because it
+  // is easier.
+  s << "{";
+  s << "\"calls\":[";
+  for (size_t i = 0; i < calls.size(); i++) {
+    size_t j = 0;
+    s << "{";
+    for (const auto& kv : calls[i]) {
+      s << "\"" << kv.first << "\":";
+      print_metric(s, kv.second);
+      if (j < calls[i].size() - 1) {
+        s << ",";
+      }
+      j++;
+    }
+    s << "}";
+    if (i < calls.size() - 1) {
+      s << ",";
+    }
+  }
+  s << "],";
+  s << "\"device_metrics\":{";
+  size_t i = 0;
+  for (const auto& dev_kv : device_metrics) {
+    size_t j = 0;
+    s << "\"" << dev_kv.first << "\":{";
+    for (const auto& metric_kv : dev_kv.second) {
+      s << "\"" << metric_kv.first << "\":";
+      print_metric(s, metric_kv.second);
+      if (j < dev_kv.second.size() - 1) {
+        s << ",";
+      }
+      j++;
+    }
+    s << "}";
+    if (i < device_metrics.size() - 1) {
+      s << ",";
+    }
+    i++;
+  }
+  s << "}}";
+  return s.str();
+}
+
+String ReportNode::AsTable(bool sort, bool aggregate, bool compute_col_sums) const {
+  // aggregate calls by op hash (or op name if hash is not set) + argument shapes
+  std::vector<Map<String, ObjectRef>> aggregated_calls;
+  if (aggregate) {
+    std::unordered_map<std::string, std::vector<size_t>> aggregates;
+    for (size_t i = 0; i < calls.size(); i++) {
+      auto& frame = calls[i];
+      auto it = frame.find("Hash");
+      std::string name = Downcast<String>(frame["Name"]);
+      if (it != frame.end()) {
+        name = Downcast<String>((*it).second);
+      }
+      if (frame.find("Argument Shapes") != frame.end()) {
+        name += Downcast<String>(frame["Argument Shapes"]);
+      }
+      if (frame.find("Device") != frame.end()) {
+        name += Downcast<String>(frame["Device"]);
+      }
+
+      if (aggregates.find(name) == aggregates.end()) {
+        aggregates[name] = {i};
+      } else {
+        aggregates[name].push_back(i);
+      }
+    }
+    for (const auto& p : aggregates) {
+      std::unordered_map<String, ObjectRef> aggregated;
+      for (auto i : p.second) {
+        for (auto& metric : calls[i]) {
+          auto it = aggregated.find(metric.first);
+          if (it == aggregated.end()) {
+            aggregated[metric.first] = metric.second;
+          } else {
+            if (metric.second.as<DurationNode>()) {
+              aggregated[metric.first] = ObjectRef(
+                  make_object<DurationNode>(it->second.as<DurationNode>()->microseconds +
+                                            metric.second.as<DurationNode>()->microseconds));
+            } else if (metric.second.as<CountNode>()) {
+              aggregated[metric.first] = ObjectRef(make_object<CountNode>(
+                  it->second.as<CountNode>()->value + metric.second.as<CountNode>()->value));
+            } else if (metric.second.as<PercentNode>()) {
+              aggregated[metric.first] =
+                  ObjectRef(make_object<PercentNode>(it->second.as<PercentNode>()->percent +
+                                                     metric.second.as<PercentNode>()->percent));
+            } else if (metric.second.as<StringObj>()) {
+              // Don't do anything. Assume the two strings are the same.
+            } else {
+              LOG(FATAL) << "Can only aggregate metrics with types DurationNode, CountNode, "
+                            "PercentNode, and StringObj, but got "
+                         << metric.second->GetTypeKey();
+            }
+          }
+        }
+      }
+      aggregated_calls.push_back(aggregated);
+    }
+  } else {
+    for (auto call : calls) {
+      aggregated_calls.push_back(call);
+    }
+  }
+
+  // sort rows by duration
+  if (sort) {
+    std::sort(aggregated_calls.begin(), aggregated_calls.end(),
+              [&](const Map<String, ObjectRef>& a, const Map<String, ObjectRef>& b) {
+                return a.at("Duration (us)").as<DurationNode>()->microseconds >
+                       b.at("Duration (us)").as<DurationNode>()->microseconds;
+              });
+  }
+
+  // compute columnwise sums
+  if (compute_col_sums) {
+    std::unordered_map<String, ObjectRef> col_sums;
+    for (auto call : aggregated_calls) {
+      for (auto p : call) {
+        if (p.second.as<CountNode>()) {
+          int64_t val = p.second.as<CountNode>()->value;
+          auto it = col_sums.find(p.first);
+          if (it != col_sums.end()) {
+            val += it->second.as<CountNode>()->value;
+          }
+          col_sums[p.first] = ObjectRef(make_object<CountNode>(val));
+        } else if (p.second.as<DurationNode>()) {
+          double val = p.second.as<DurationNode>()->microseconds;
+          auto it = col_sums.find(p.first);
+          if (it != col_sums.end()) {
+            val += it->second.as<DurationNode>()->microseconds;
+          }
+          col_sums[p.first] = ObjectRef(make_object<DurationNode>(val));
+        } else if (p.second.as<PercentNode>()) {
+          double val = p.second.as<PercentNode>()->percent;
+          auto it = col_sums.find(p.first);
+          if (it != col_sums.end()) {
+            val += it->second.as<PercentNode>()->percent;
+          }
+          col_sums[p.first] = ObjectRef(make_object<PercentNode>(val));
+        }
+      }
+    }
+    col_sums["Name"] = String("Sum");
+    aggregated_calls.push_back({{String("Name"), String("----------")}});  // separator
+    aggregated_calls.push_back(col_sums);
+  }
+
+  // per-device metrics
+  for (auto p : device_metrics) {
+    Map<String, ObjectRef> metrics = p.second;
+    metrics.Set("Name", String("Total"));
+    aggregated_calls.push_back(metrics);
+  }
+
+  // Table formatting
+  std::set<std::string> unique_headers;
+  for (auto row : aggregated_calls) {
+    for (auto p : row) {
+      unique_headers.insert(p.first);
+    }
+  }
+
+  // always include these headers in this order
+  std::vector<std::string> headers = {"Name",   "Duration (us)", "Percent",
+                                      "Device", "Count",         "Argument Shapes"};
   for (auto header : unique_headers) {
-    if (header != "Name" && header != "Duration (us)" && header != "Percent" &&
-        hidden_cols.find(header) == hidden_cols.end()) {
+    if (std::find(headers.begin(), headers.end(), header) == headers.end()) {
       headers.push_back(header);
     }
   }
 
+  // Switch layout from row major to column major so we can easily compute column widths.
   std::vector<std::vector<std::string>> cols;
   for (auto header : headers) {
     cols.push_back({header});
   }
-  for (auto row : rows) {
+  for (auto row : aggregated_calls) {
     for (size_t i = 0; i < headers.size(); i++) {
       auto it = row.find(headers[i]);
       if (it == row.end()) {
+        // fill empty data with empty strings
         cols[i].push_back("");
       } else {
         std::string val;
-        if (it->second.as<CountNode>()) {
+        if ((*it).second.as<CountNode>()) {
           std::stringstream s;
           s.imbue(std::locale(""));  // for 1000s seperators
-          s << std::fixed << it->second.as<CountNode>()->value;
+          s << std::fixed << (*it).second.as<CountNode>()->value;
           val = s.str();
-        } else if (it->second.as<DurationNode>()) {
+        } else if ((*it).second.as<DurationNode>()) {
           std::stringstream s;
           s.imbue(std::locale(""));  // for 1000s seperators
-          s << std::fixed << std::setprecision(2) << it->second.as<DurationNode>()->microseconds;
+          s << std::fixed << std::setprecision(2) << (*it).second.as<DurationNode>()->microseconds;
           val = s.str();
-        } else if (it->second.as<PercentNode>()) {
+        } else if ((*it).second.as<PercentNode>()) {
           std::stringstream s;
-          s << std::fixed << std::setprecision(2) << it->second.as<PercentNode>()->percent;
+          s << std::fixed << std::setprecision(2) << (*it).second.as<PercentNode>()->percent;
           val = s.str();
-        } else if (it->second.as<StringObj>()) {
-          val = Downcast<String>(it->second);
+        } else if ((*it).second.as<StringObj>()) {
+          val = Downcast<String>((*it).second);
         }
         cols[i].push_back(val);
       }
@@ -234,135 +541,142 @@ std::string FormatTable(const std::vector<std::unordered_map<std::string, Object
   return s.str();
 }
 
-String Profiler::Report(bool aggregate, bool sort) {
-  std::vector<std::pair<Device, double>> global_times;
-  for (auto p : global_timers_) {
-    global_times.emplace_back(p.first, p.second->SyncAndGetElapsedNanos() / 1e3);
-  }
-  double overall_time = 0.;
-  for (auto p : global_times) {
-    overall_time = std::max(overall_time, p.second);
-  }
+std::string DeviceString(Device dev) {
+  return DeviceName(dev.device_type) + std::to_string(dev.device_id);
+}
 
-  // aggregate times by op name
-  std::vector<std::pair<std::string, std::vector<size_t>>> aggregate_rows;
-  if (aggregate) {
-    std::unordered_map<std::string, std::vector<size_t>> aggregates;
-    for (size_t i = 0; i < calls_.size(); i++) {
-      CallFrame& cf = calls_[i];
-      std::string name = cf.name;
-      // don't aggregate dynamic ops with different shapes
-      auto it = cf.extra_metrics.find("Argument Shapes");
-      if (it != cf.extra_metrics.end()) {
-        name = name + Downcast<String>(it->second);
-      }
-
-      if (aggregates.find(name) == aggregates.end()) {
-        aggregates[name] = {i};
-      } else {
-        aggregates[name].push_back(i);
-      }
+Report Profiler::Report(bool aggregate, bool sort) {
+  // sync all timers and normalize rows
+  std::vector<std::unordered_map<String, ObjectRef>> rows;
+  for (auto& cf : calls_) {
+    std::unordered_map<String, ObjectRef> row;
+    double us = cf.timer->SyncAndGetElapsedNanos() / 1e3;
+    row["Duration (us)"] = ObjectRef(make_object<DurationNode>(us));
+    row["Count"] = ObjectRef(make_object<CountNode>(1));
+    row["Name"] = cf.name;
+    row["Device"] = String(DeviceString(cf.dev));
+    for (auto p : cf.extra_metrics) {
+      row[p.first] = p.second;
     }
-    for (const auto& p : aggregates) {
-      aggregate_rows.push_back(p);
-    }
-  } else {
-    for (size_t i = 0; i < calls_.size(); i++) {
-      aggregate_rows.push_back({calls_[i].name, {i}});
-    }
-  }
-
-  // aggregated rows (poor man's dataframe)
-  std::vector<std::unordered_map<std::string, ObjectRef>> rows;
-
-  // form aggregates and compute aggregate statistics (sum).
-  for (auto p : aggregate_rows) {
-    std::unordered_map<std::string, ObjectRef> row;
-    double time_sum = 0;
-    size_t count = 0;
-    for (auto i : p.second) {
-      double us = calls_[i].timer->SyncAndGetElapsedNanos() / 1e3;
-      time_sum += us;
-      count += 1;
-    }
-    row["Percent"] = ObjectRef(make_object<PercentNode>(time_sum / overall_time * 100));
-    row["Duration (us)"] = ObjectRef(make_object<DurationNode>(time_sum));
-    row["Count"] = ObjectRef(make_object<CountNode>(count));
-    row["Name"] = calls_[p.second[0]].name;
-    Device dev = calls_[p.second[0]].dev;
-    row["Device"] = String(DeviceName(dev.device_type) + std::to_string(dev.device_id));
-
-    // assume all rows in the aggregate have the same metrics
-    for (auto metric : calls_[p.second[0]].extra_metrics) {
-      if (metric.second.as<CountNode>()) {
-        int64_t sum = 0;
-        for (auto i : p.second) {
-          sum += calls_[i].extra_metrics[metric.first].as<CountNode>()->value;
-        }
-        row[metric.first] = ObjectRef(make_object<CountNode>(sum));
-      } else if (metric.second.as<DurationNode>()) {
-        double sum = 0;
-        for (auto i : p.second) {
-          sum += calls_[i].extra_metrics[metric.first].as<DurationNode>()->microseconds;
-        }
-        row[metric.first] = ObjectRef(make_object<DurationNode>(sum));
-      } else if (metric.second.as<PercentNode>()) {
-        double sum = 0;
-        for (auto i : p.second) {
-          sum += calls_[i].extra_metrics[metric.first].as<PercentNode>()->percent;
-        }
-        row[metric.first] = ObjectRef(make_object<PercentNode>(sum));
-      } else if (metric.second.as<StringObj>()) {
-        // assume all rows contain the same value for this metric
-        row[metric.first] = Downcast<String>(metric.second);
-      }
-    }
-
     rows.push_back(row);
   }
 
-  // sort rows by duration
-  if (sort) {
-    std::sort(rows.begin(), rows.end(),
-              [&](const std::unordered_map<std::string, ObjectRef>& a,
-                  const std::unordered_map<std::string, ObjectRef>& b) {
-                return a.at("Duration (us)").as<DurationNode>()->microseconds >
-                       b.at("Duration (us)").as<DurationNode>()->microseconds;
-              });
+  // the last couple of call frames are the overall times
+  double overall_time_us = 0;
+  std::unordered_map<String, Map<String, ObjectRef>> device_metrics;
+  for (size_t i = 0; i < devs_.size(); i++) {
+    auto row = rows[rows.size() - 1];
+    rows.pop_back();
+    device_metrics[Downcast<String>(row["Device"])] = row;
+    overall_time_us =
+        std::max(overall_time_us, row["Duration (us)"].as<DurationNode>()->microseconds);
   }
 
-  double op_sum = 0;
-  int64_t total_count = 0;
-  double per = 0;
-  for (auto row : rows) {
-    op_sum += row["Duration (us)"].as<DurationNode>()->microseconds;
-    total_count += row["Count"].as<CountNode>()->value;
-    per += row["Percent"].as<PercentNode>()->percent;
+  // Calculate percentages
+  for (auto& row : rows) {
+    row["Percent"] = ObjectRef(make_object<PercentNode>(
+        row["Duration (us)"].as<DurationNode>()->microseconds / overall_time_us * 100));
   }
 
-  rows.push_back({{"Name", String("------------------")}});
-  rows.push_back({{"Name", String("Total")},
-                  {"Duration (us)", ObjectRef(make_object<DurationNode>(op_sum))},
-                  {"Count", ObjectRef(make_object<CountNode>(total_count))},
-                  {"Percent", ObjectRef(make_object<PercentNode>(per))}});
-
-  std::stringstream s;
-  s.imbue(std::locale(""));
-  s << FormatTable(rows);
-  s << std::fixed << std::setprecision(2);
-  for (auto p : global_times) {
-    s << "Total time " << DeviceName(p.first.device_type) << p.first.device_id << ": " << p.second
-      << "us" << std::endl;
+  // convert to map
+  std::vector<Map<String, ObjectRef>> converted_rows;
+  for (const auto& row : rows) {
+    converted_rows.push_back(row);
   }
-  s << "Overhead: " << overall_time - op_sum << "us  "
-    << (overall_time - op_sum) / overall_time * 100 << "%  (Time not spent in operators)";
 
-  return s.str();
+  return profiling::Report(converted_rows, device_metrics);
+}
+
+Report::Report(Array<Map<String, ObjectRef>> calls,
+               Map<String, Map<String, ObjectRef>> device_metrics) {
+  auto node = make_object<ReportNode>();
+  node->calls = std::move(calls);
+  node->device_metrics = std::move(device_metrics);
+  data_ = std::move(node);
+}
+
+Map<String, ObjectRef> parse_metrics(dmlc::JSONReader* reader) {
+  reader->BeginObject();
+  std::string metric_name, metric_value_name;
+  Map<String, ObjectRef> metrics;
+  while (reader->NextObjectItem(&metric_name)) {
+    ObjectRef o;
+    reader->BeginObject();
+    reader->NextObjectItem(&metric_value_name);
+    if (metric_value_name == "microseconds") {
+      double microseconds;
+      reader->Read(&microseconds);
+      o = ObjectRef(make_object<DurationNode>(microseconds));
+    } else if (metric_value_name == "percent") {
+      double percent;
+      reader->Read(&percent);
+      o = ObjectRef(make_object<PercentNode>(percent));
+    } else if (metric_value_name == "count") {
+      int64_t count;
+      reader->Read(&count);
+      o = ObjectRef(make_object<CountNode>(count));
+    } else if (metric_value_name == "string") {
+      std::string s;
+      reader->Read(&s);
+      o = String(s);
+    } else {
+      LOG(FATAL) << "Cannot parse metric of type " << metric_value_name
+                 << " valid types are microseconds, percent, count.";
+    }
+    metrics.Set(metric_name, o);
+    // Necessary to make sure that the parser hits the end of the object.
+    ICHECK(!reader->NextObjectItem(&metric_value_name));
+    // EndObject does not exist, leaving this here for clarity
+    // reader.EndObject();
+  }
+  // reader.EndObject();
+  return metrics;
+}
+
+Report Report::FromJSON(String json) {
+  std::stringstream input(json.operator std::string());
+  dmlc::JSONReader reader(&input);
+  std::string key;
+  Array<Map<String, ObjectRef>> calls;
+  Map<String, Map<String, ObjectRef>> device_metrics;
+
+  reader.BeginObject();
+  while (reader.NextObjectItem(&key)) {
+    if (key == "calls") {
+      reader.BeginArray();
+      while (reader.NextArrayItem()) {
+        calls.push_back(parse_metrics(&reader));
+      }
+      // reader.EndArray();
+    } else if (key == "device_metrics") {
+      reader.BeginObject();
+      std::string device_name;
+      while (reader.NextObjectItem(&device_name)) {
+        device_metrics.Set(device_name, parse_metrics(&reader));
+      }
+      // reader.EndObject();
+    }
+  }
+
+  return Report(calls, device_metrics);
 }
 
 TVM_REGISTER_OBJECT_TYPE(DurationNode);
 TVM_REGISTER_OBJECT_TYPE(PercentNode);
 TVM_REGISTER_OBJECT_TYPE(CountNode);
+TVM_REGISTER_OBJECT_TYPE(ReportNode);
+TVM_REGISTER_OBJECT_TYPE(DeviceWrapperNode);
+TVM_REGISTER_OBJECT_TYPE(MetricCollectorNode);
+
+TVM_REGISTER_GLOBAL("runtime.profiling.AsTable").set_body_method<Report>(&ReportNode::AsTable);
+TVM_REGISTER_GLOBAL("runtime.profiling.AsCSV").set_body_typed([](Report n) { return n->AsCSV(); });
+TVM_REGISTER_GLOBAL("runtime.profiling.AsJSON").set_body_typed([](Report n) {
+  return n->AsJSON();
+});
+TVM_REGISTER_GLOBAL("runtime.profiling.FromJSON").set_body_typed(Report::FromJSON);
+TVM_REGISTER_GLOBAL("runtime.profiling.DeviceWrapper").set_body_typed([](Device dev) {
+  return DeviceWrapper(dev);
+});
 }  // namespace profiling
 }  // namespace runtime
 }  // namespace tvm

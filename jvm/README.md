@@ -105,7 +105,7 @@ def test_add(target_dir):
     B = te.placeholder((n,), name='B')
     C = te.compute(A.shape, lambda i: A[i] + B[i], name="C")
     s = te.create_schedule(C.op)
-    fadd = tvm.build(s, [A, B, C], "llvm", target_host="llvm", name="myadd")
+    fadd = tvm.build(s, [A, B, C], "llvm", name="myadd")
 
     fadd.save(os.path.join(target_dir, "add_cpu.o"))
     cc.create_shared(os.path.join(target_dir, "add_cpu.so"),
@@ -164,7 +164,7 @@ server.start();
 This will open a socket and wait for remote requests. You can use Java, Python, or any other frontend to make an RPC call. Here's an example for calling remote function `test.rpc.strcat` in Java.
 
 ```java
-RPCSession client = Client.connect("localhost", port.value);
+RPCSession client = Client.connect("127.0.0.1", port.value);
 Function func = client.getFunction("test.rpc.strcat");
 String result = func.call("abc", 11L).asString();
 ```

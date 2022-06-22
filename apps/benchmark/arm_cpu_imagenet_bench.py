@@ -40,7 +40,7 @@ def evaluate_network(network, target, target_host, repeat):
 
     print_progress("%-20s building..." % network)
     with tvm.transform.PassContext(opt_level=3):
-        lib = relay.build(net, target=target, target_host=target_host, params=params)
+        lib = relay.build(net, target=tvm.target.Target(target, host=target_host), params=params)
 
     tmp = tempdir()
     if "android" in str(target):
@@ -98,7 +98,7 @@ if __name__ == "__main__":
         help="The model of the test device. If your device is not listed in "
         "the choices list, pick the most similar one as argument.",
     )
-    parser.add_argument("--host", type=str, default="localhost")
+    parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9190)
     parser.add_argument("--rpc-key", type=str, required=True)
     parser.add_argument("--repeat", type=int, default=10)

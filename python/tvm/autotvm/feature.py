@@ -31,7 +31,6 @@ import numpy as np
 import tvm._ffi
 
 from tvm.target import Target
-from tvm.te import schedule
 from tvm.driver import build_module
 
 
@@ -39,13 +38,12 @@ def ana_lower(sch, args, binds=None, simple_mode=True):
     """Do lower while keeping all axes in IR
     i.e. Do not eliminate loop with extent of 1, do not vectorize, unroll or inject virtual threads
     """
-    binds, _ = build_module.get_binds(args, binds)
     sch = sch.normalize()
     # Phase 0
-    bounds = schedule.InferBound(sch)
-    stmt = schedule.ScheduleOps(sch, bounds, True)
-    func = schedule.SchedulePostProcToPrimFunc(args, stmt, None)
-    mod = tvm.IRModule.from_expr(func._move())
+    context = tvm.transform.PassContext(config={"tir.debug_keep_trivial_loop": True})
+    with context:
+        mod = build_module.schedule_to_module(sch, args, binds=binds)
+
     mod = tvm.tir.transform.StorageFlatten(64)(mod._move())
     mod = tvm.tir.transform.Simplify()(mod._move())
     assert simple_mode
@@ -55,6 +53,9 @@ def ana_lower(sch, args, binds=None, simple_mode=True):
 try:
     _get_buffer_curve_sample_flatten = tvm._ffi.get_global_func(
         "autotvm.feature.GetCurveSampleFeatureFlatten"
+    )
+    _get_buffer_curve_sample = tvm._ffi.get_global_func(
+        "autotvm.feature.GetCurveSampleFeature"
     )
     _get_itervar_feature = tvm._ffi.get_global_func("autotvm.feature.GetItervarFeature")
     _get_itervar_feature_flatten = tvm._ffi.get_global_func(
@@ -67,7 +68,7 @@ except ValueError as e:
 
     _get_buffer_curve_sample_flatten = (
         _get_itervar_feature
-    ) = _get_itervar_feature_flatten = raise_error
+    ) = _get_buffer_curve_sample = _get_itervar_feature_flatten = raise_error
 
 
 def get_itervar_feature(sch, args, take_log=False):
@@ -213,5 +214,27 @@ def get_buffer_curve_sample_flatten(sch, args, sample_n=30):
     """
     stmt = ana_lower(sch, args, simple_mode=True)
     feas = _get_buffer_curve_sample_flatten(stmt, sample_n, False)
+    feas = struct.unpack("%df" % (len(feas) // 4), feas)
+    return feas
+
+def get_buffer_curve_sample(sch, args, sample_n=30):
+    """
+    Get flatten curve sample feature (relation feature)
+
+    Parameters
+    ----------
+    sch: tvm.te.schedule.Schedule
+    args: Array of te.tensor.Tensor
+        the buffer args for lower
+    sample_n: int
+        number of sample points along one dimension
+
+    Returns
+    -------
+    flatten_feature: np.ndarray
+        one-dimensional vector
+    """
+    stmt = ana_lower(sch, args, simple_mode=True)
+    feas = _get_buffer_curve_sample(stmt, sample_n, False)
     feas = struct.unpack("%df" % (len(feas) // 4), feas)
     return feas

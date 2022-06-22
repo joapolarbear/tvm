@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Ethos-N test functions"""
+"""Arm(R) Ethos(TM)-N test functions"""
 
 from __future__ import absolute_import, print_function
 import tvm
@@ -149,7 +149,7 @@ def build(mod, params, npu=True, expected_host_ops=0, npu_partitions=1):
     npu_partitions : int, optional
         The number of Ethos-N partitions expected.
     """
-    relay.backend.compile_engine.get().clear()
+    relay.backend.te_compiler.get().clear()
     with tvm.transform.PassContext(
         opt_level=3, config={"relay.ext.ethos-n.options": {"variant": get_ethosn_variant()}}
     ):
@@ -170,11 +170,19 @@ def build(mod, params, npu=True, expected_host_ops=0, npu_partitions=1):
                 assert (
                     host_op_count == expected_host_ops
                 ), "Got {} host operators, expected {}".format(host_op_count, expected_host_ops)
-                partition_count = 0
-                for global_var in mod.get_global_vars():
-                    if "ethos-n" in global_var.name_hint:
-                        partition_count += 1
 
+                attrs = [
+                    mod[var.name_hint].attrs
+                    for var in mod.get_global_vars()
+                    if mod[var.name_hint].attrs
+                ]
+                partition_count = sum(
+                    [
+                        key == "Compiler" and value == "ethos-n"
+                        for attr in attrs
+                        for key, value in attr.items()
+                    ]
+                )
                 assert (
                     npu_partitions == partition_count
                 ), "Got {} ethos-n partitions, expected {}".format(partition_count, npu_partitions)
@@ -235,12 +243,12 @@ def verify(answers, atol, rtol=1e-07, verify_saturation=True):
         for outs in combinations(answer, 2):
             if verify_saturation:
                 assert (
-                    np.count_nonzero(outs[0].asnumpy() == 255) < 0.25 * outs[0].asnumpy().size
+                    np.count_nonzero(outs[0].numpy() == 255) < 0.25 * outs[0].numpy().size
                 ), "Output is saturated: {}".format(outs[0])
                 assert (
-                    np.count_nonzero(outs[0].asnumpy() == 0) < 0.25 * outs[0].asnumpy().size
+                    np.count_nonzero(outs[0].numpy() == 0) < 0.25 * outs[0].numpy().size
                 ), "Output is saturated: {}".format(outs[0])
-            tvm.testing.assert_allclose(outs[0].asnumpy(), outs[1].asnumpy(), rtol=rtol, atol=atol)
+            tvm.testing.assert_allclose(outs[0].numpy(), outs[1].numpy(), rtol=rtol, atol=atol)
 
 
 def inference_result(outputs):
@@ -254,7 +262,9 @@ def inference_result(outputs):
 
 def test_error(mod, params, err_msg):
     caught = None
-    with tvm.transform.PassContext(opt_level=3):
+    with tvm.transform.PassContext(
+        opt_level=3, config={"relay.ext.ethos-n.options": {"variant": get_ethosn_variant()}}
+    ):
         with tvm.target.Target("llvm"):
             try:
                 mod = relay.transform.InferType()(mod)
@@ -262,7 +272,7 @@ def test_error(mod, params, err_msg):
             except tvm.error.TVMError as e:
                 caught = e.args[0]
             finally:
-                relay.backend.compile_engine.get().clear()
+                relay.backend.te_compiler.get().clear()
 
     assert caught is not None
     assert err_msg in caught, caught
@@ -324,7 +334,4 @@ def get_ethosn_api_version():
 
 
 def get_ethosn_variant():
-    ethosn_variant_config = os.getenv("ETHOSN_VARIANT_CONFIG")
-    if ethosn_variant_config is not None:
-        return 3
-    return 0
+    return os.getenv("ETHOSN_VARIANT_CONFIG", default="Ethos-N78_1TOPS_2PLE_RATIO")

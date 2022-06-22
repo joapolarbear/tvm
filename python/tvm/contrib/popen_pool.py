@@ -44,10 +44,11 @@ def kill_child_processes(pid):
 
     try:
         parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
     except psutil.NoSuchProcess:
         return
 
-    for process in parent.children(recursive=True):
+    for process in children:
         try:
             process.kill()
         except psutil.NoSuchProcess:
@@ -83,10 +84,22 @@ class PopenWorker:
 
     PopenWorker provides a low-level
     API to interact with a separate process via Popen.
+
+    Parameters
+    ----------
+    initializer: callable or None
+        A callable initializer, or None
+
+    initargs: Tuple[object]
+        A tuple of args for the initializer
     """
 
-    def __init__(self):
+    def __init__(self, initializer=None, initargs=()):
         self._proc = None
+        self._initializer = initializer
+        self._initargs = initargs
+        if self._initializer is not None and not callable(self._initializer):
+            raise TypeError("initializer must be callable for PopenWorker")
 
     def __del__(self):
         try:
@@ -152,10 +165,26 @@ class PopenWorker:
         self._reader = os.fdopen(main_read, "rb")
         self._writer = os.fdopen(main_write, "wb")
 
-    def join(self):
-        """Join the current process worker before it terminates"""
+    def join(self, timeout=None):
+        """Join the current process worker before it terminates.
+
+        Parameters
+        ----------
+        timeout: Optional[number]
+            Timeout value, block at most timeout seconds if it
+            is a positive number.
+        """
         if self._proc:
-            self._proc.wait()
+            try:
+                self._proc.wait(timeout)
+            except subprocess.TimeoutExpired:
+                pass
+
+    def is_alive(self):
+        """Check if the process is alive"""
+        if self._proc:
+            return self._proc.poll() is None
+        return False
 
     def send(self, fn, args=(), kwargs=None, timeout=None):
         """Send a new function task fn(*args, **kwargs) to the subprocess.
@@ -186,6 +215,10 @@ class PopenWorker:
 
         if self._proc is None:
             self._start()
+            # init
+            if self._initializer is not None:
+                self.send(self._initializer, self._initargs)
+                self.recv()
         kwargs = {} if not kwargs else kwargs
         data = cloudpickle.dumps((fn, args, kwargs, timeout), protocol=pickle.HIGHEST_PROTOCOL)
         try:
@@ -252,14 +285,33 @@ class PopenPoolExecutor:
 
     timeout : float
         Timeout value for each function submit.
+
+    initializer: callable or None
+        A callable initializer, or None
+
+    initargs: Tuple[object]
+        A tuple of args for the initializer
+
+    Note
+    ----
+    If max_workers is NONE then the number returned by
+    os.cpu_count() is used. This method aligns with the
+    behavior of multiprocessing.pool().
     """
 
-    def __init__(self, max_workers, timeout=None):
+    def __init__(self, max_workers=None, timeout=None, initializer=None, initargs=()):
+        if max_workers is None:
+            max_workers = os.cpu_count()
         # Use an internal thread pool to send to popen workers
         self._threadpool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         self._timeout = timeout
         self._worker_map = {}
         self._lock = threading.Lock()
+        self._initializer = initializer
+        self._initargs = initargs
+
+        if self._initializer is not None and not callable(self._initializer):
+            raise TypeError("initializer must be callable for PopenPoolExecutor")
 
     def __del__(self):
         self._lock.acquire()
@@ -276,7 +328,7 @@ class PopenPoolExecutor:
         self._lock.acquire()
         tid = threading.get_ident()
         if tid not in self._worker_map:
-            proc = PopenWorker()
+            proc = PopenWorker(self._initializer, self._initargs)
             self._worker_map[tid] = proc
         else:
             proc = self._worker_map[tid]

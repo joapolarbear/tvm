@@ -93,7 +93,7 @@ def verify_keras_frontend(keras_model, need_transpose=True, layout="NCHW"):
         for name, x in zip(keras_model.input_names, xs):
             m.set_input(name, tvm.nd.array(x.astype(dtype)))
         m.run()
-        return [m.get_output(i).asnumpy() for i in range(m.get_num_outputs())]
+        return [m.get_output(i).numpy() for i in range(m.get_num_outputs())]
 
     def to_channels_first(arr):
         return arr.transpose([0, -1] + list(range(1, arr.ndim - 1)))
@@ -198,6 +198,11 @@ class TestKeras:
         x = keras.layers.Dense(10, activation="relu", kernel_initializer="uniform")(x)
         keras_model = keras.models.Model(data, x)
         verify_keras_frontend(keras_model)
+        # RNN dense
+        data = keras.layers.Input(shape=(1, 32))
+        x = keras.layers.Dense(32, activation="relu", kernel_initializer="uniform")(data)
+        keras_model = keras.models.Model(data, x)
+        verify_keras_frontend(keras_model, need_transpose=False)
 
     def test_forward_permute(self, keras):
         data = keras.layers.Input(shape=(2, 3, 4))
@@ -412,6 +417,17 @@ class TestKeras:
         keras_model = keras.models.Model(data, z)
         verify_keras_frontend(keras_model)
 
+    def test_forward_lstm(self, keras):
+        data = keras.layers.Input(shape=(10, 32))
+        rnn_funcs = [
+            keras.layers.LSTM(16),
+            keras.layers.LSTM(16, return_sequences=True),
+        ]
+        for rnn_func in rnn_funcs:
+            x = rnn_func(data)
+            keras_model = keras.models.Model(data, x)
+            verify_keras_frontend(keras_model, need_transpose=False)
+
     def test_forward_rnn(self, keras):
         data = keras.layers.Input(shape=(1, 32))
         rnn_funcs = [
@@ -574,6 +590,40 @@ class TestKeras:
             keras_model = keras.models.Model(data, x)
             verify_keras_frontend(keras_model, layout="NDHWC")
 
+    def test_forward_nested_layers(self, keras):
+        sub_model = keras.applications.MobileNet(
+            include_top=False, weights="imagenet", input_shape=(224, 224, 3)
+        )
+        keras_model = keras.Sequential(
+            [
+                sub_model,
+                keras.layers.GlobalAveragePooling2D(),
+                keras.layers.Dense(1024, activation="relu"),
+                keras.layers.Dense(2, activation="sigmoid"),
+            ]
+        )
+        verify_keras_frontend(keras_model)
+
+    def test_forward_l2_normalize(self, keras):
+        data = keras.layers.Input(shape=(16, 12, 8))
+        K = keras.backend
+        l2_funcs = [
+            keras.layers.Lambda(lambda v: K.l2_normalize(v, axis=-2)),
+            keras.layers.Lambda(lambda v: K.l2_normalize(x=v, axis=-1)),
+            keras.layers.Lambda(lambda v: K.l2_normalize(axis=1, x=v)),
+            keras.layers.Lambda(lambda v: K.l2_normalize(v, 2)),
+            keras.layers.Lambda(lambda v: K.l2_normalize(v, axis=3)),
+            keras.layers.Lambda(lambda v: K.l2_normalize(v, axis=(2, 3))),
+            keras.layers.Lambda(lambda v: K.l2_normalize(v, (1, 2))),
+            keras.layers.Lambda(lambda v: K.l2_normalize(v, axis=[-2, -1])),
+            keras.layers.Lambda(lambda v: K.l2_normalize(v, [-3, -2])),
+        ]
+        for l2_func in l2_funcs:
+            x = l2_func(data)
+            keras_model = keras.models.Model(data, x)
+            verify_keras_frontend(keras_model, layout="NCHW")
+            verify_keras_frontend(keras_model, layout="NHWC")
+
 
 if __name__ == "__main__":
     for k in [keras, tf_keras]:
@@ -594,6 +644,7 @@ if __name__ == "__main__":
         sut.test_forward_multi_inputs(keras=k)
         sut.test_forward_multi_outputs(keras=k)
         sut.test_forward_reuse_layers(keras=k)
+        sut.test_forward_lstm(keras=k)
         sut.test_forward_rnn(keras=k)
         sut.test_forward_vgg16(keras=k)
         sut.test_forward_vgg16(keras=k, layout="NHWC")
@@ -610,3 +661,4 @@ if __name__ == "__main__":
         sut.test_forward_zero_padding3d(keras=k)
         sut.test_forward_embedding(keras=k)
         sut.test_forward_repeat_vector(keras=k)
+        sut.test_forward_l2_normalize(keras=k)

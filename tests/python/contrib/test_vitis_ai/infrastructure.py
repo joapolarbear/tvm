@@ -31,7 +31,7 @@ import tvm
 from tvm import relay
 from tvm import runtime
 from tvm.relay import transform
-from tvm.relay.op.contrib.vitis_ai import annotation
+from tvm.relay.op.contrib.vitis_ai import partition_for_vitis_ai
 from tvm.relay.build_module import bind_params_by_name
 from tvm.contrib.target import vitis_ai
 from tvm.contrib import graph_executor
@@ -68,7 +68,7 @@ def skip_test():
 def build_module(
     mod,
     target,
-    dpu_target="DPUCADX8G",
+    dpu_target="DPUCADF8H",
     params=None,
     enable_vitis_ai=True,
     tvm_ops=0,
@@ -84,10 +84,7 @@ def build_module(
         opt_level=3, config={"relay.ext.vitis_ai.options.target": dpu_target}
     ):
         if enable_vitis_ai:
-            mod["main"] = bind_params_by_name(mod["main"], params)
-            mod = annotation(mod, params, dpu_target)
-            mod = transform.MergeCompilerRegions()(mod)
-            mod = transform.PartitionGraph()(mod)
+            mod = partition_for_vitis_ai(mod, params, dpu_target)
             tvm_op_count = get_cpu_op_count(mod)
             assert tvm_op_count == tvm_ops, "Got {} TVM operators, expected {}".format(
                 tvm_op_count, tvm_ops
@@ -102,7 +99,7 @@ def build_module(
             ), "Got {} Vitis-AI partitions, expected {}".format(
                 partition_count, vitis_ai_partitions
             )
-        relay.backend.compile_engine.get().clear()
+        relay.backend.te_compiler.get().clear()
         return relay.build(mod, target, params=params)
 
 
@@ -126,10 +123,17 @@ def extract_vitis_ai_modules(module):
 
 
 def verify_codegen(
-    module, num_vitis_ai_modules=1, params=None, target="llvm", dpu_target="DPUCADX8G"
+    module, num_vitis_ai_modules=1, params=None, target="llvm", tvm_ops=0, dpu_target="DPUCADX8G"
 ):
     """Check Vitis-AI codegen against a known good output."""
-    module = build_module(module, target, params=params, dpu_target=dpu_target)
+    module = build_module(
+        module,
+        target,
+        params=params,
+        dpu_target=dpu_target,
+        tvm_ops=tvm_ops,
+        vitis_ai_partitions=num_vitis_ai_modules,
+    )
     vitis_ai_modules = extract_vitis_ai_modules(module)
 
     assert len(vitis_ai_modules) == num_vitis_ai_modules, (
@@ -167,4 +171,4 @@ def verify_result(
     for idx, shape in enumerate(out_shapes):
         out = tvm.nd.empty(shape, device=device)
         out = rt_mod.get_output(idx, out)
-        tvm.testing.assert_allclose(out.asnumpy(), results[idx], rtol=tol, atol=tol)
+        tvm.testing.assert_allclose(out.numpy(), results[idx], rtol=tol, atol=tol)

@@ -50,8 +50,9 @@ using namespace tvm::runtime::json;
 typedef VerilatorHandle (*VerilatorAllocFunc)();
 typedef void (*VerilatorDeallocFunc)(VerilatorHandle);
 typedef void (*VerilatorResetFunc)(VerilatorHandle, int);
-typedef void (*VerilatorAddFunc)(VerilatorHandle, int*, int*, int*, int, int);
 typedef int (*VerilatorReadFunc)(VerilatorHandle, int, int);
+typedef void (*VerilatorAddFunc)(VerilatorHandle, int*, int*, int*, int, int);
+typedef void (*VerilatorBiasAddFunc)(VerilatorHandle, int*, int*, int*, int, int, int, int);
 
 class VerilatorLibrary : public Library {
  public:
@@ -87,11 +88,13 @@ class VerilatorRuntime : public JSONRuntimeBase {
  public:
   VerilatorRuntime(const std::string& symbol_name, const std::string& graph_json,
                    const Array<String> const_names)
-      : JSONRuntimeBase(symbol_name, graph_json, const_names) {}
+      : JSONRuntimeBase(symbol_name, graph_json, const_names) {
+    VLOG(0) << "creating verilator runtime";
+  }
 
   ~VerilatorRuntime();
 
-  const char* type_key() const { return "verilator"; }
+  const char* type_key() const final { return "verilator"; }
 
   /*! \brief set verilator library */
   void SetLibrary(const std::string& lib_name);
@@ -122,8 +125,6 @@ class VerilatorRuntime : public JSONRuntimeBase {
   VerilatorProfiler* prof_{nullptr};
   /*! \brief the verilator read function */
   VerilatorReadFunc read_{nullptr};
-  /*! \brief the verilator add op function */
-  VerilatorAddFunc add_op_{nullptr};
   /*! \brief the verilator reset cycles */
   int reset_cycles_{1};
   /*! \brief the verilator profiler status */

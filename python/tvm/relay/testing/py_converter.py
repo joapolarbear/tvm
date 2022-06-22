@@ -24,7 +24,7 @@ import re
 import tvm
 from tvm import relay
 from tvm.relay.adt import Pattern
-from tvm.relay.backend import compile_engine
+from tvm.relay.backend import te_compiler
 from tvm.relay.expr import Expr, GlobalVar, Var
 from tvm.relay.function import Function
 from tvm.relay.expr_functor import ExprFunctor
@@ -61,7 +61,7 @@ class PythonConverter(ExprFunctor):
         super().__init__()
         self.mod = mod
         self.tgt = target
-        self.engine = compile_engine.get()
+        self.tec = te_compiler.get()
         self.fun_no = 0
         self.var_no = 0
         self.var_map = {}
@@ -153,7 +153,10 @@ class PythonConverter(ExprFunctor):
     def parse_numpy_array(self, arr):
         """Given a Numpy array, produces an appropriate Python array
         or numerical literal representing its contents."""
-        parse_single = lambda i: NameConstant(i) if isinstance(i, bool) else Num(i)
+
+        def parse_single(i):
+            return NameConstant(i) if isinstance(i, bool) else Num(i)
+
         if arr.ndim == 0:
             return parse_single(arr.item())
         if arr.ndim == 1:
@@ -240,11 +243,11 @@ class PythonConverter(ExprFunctor):
         the generated Python code."""
 
         # compile the function and register globally
-        cc_key = compile_engine.CCacheKey(op, self.tgt)
+        cc_key = te_compiler.CCacheKey(op, self.tgt)
         func_hash = tvm.ir.structural_hash(op)
         op_name = "_lowered_op_{}".format(func_hash)
         if not tvm.get_global_func(op_name, allow_missing=True):
-            jitted = self.engine.jit(cc_key, self.tgt)
+            jitted = self.tec.jit(cc_key, self.tgt)
             tvm.register_func(op_name, jitted)
 
         def convert_input(py_input, arg_type):
@@ -467,7 +470,7 @@ class PythonConverter(ExprFunctor):
         false_body, false_defs = self.visit(if_block.false_branch)
 
         # need to get the value out of a NDArray to check the condition
-        # equvialent to: val.asnumpy()
+        # equvialent to: val.numpy()
         cond_check = ast.Call(ast.Attribute(cond_body, "asnumpy", Load()), [], [])
         ret = ast.IfExp(cond_check, true_body, false_body)
         return (ret, cond_defs + true_defs + false_defs)
@@ -476,7 +479,7 @@ class PythonConverter(ExprFunctor):
         """Proceeds by converting constant value to a numpy array
         and converting it to the appropriate value in the generated
         code (whether it be a Python scalar or a Numpy array)"""
-        value = constant.data.asnumpy()
+        value = constant.data.numpy()
         const_expr = ast.Call(
             ast.Attribute(Name("numpy", Load()), "array", Load()),
             [self.parse_numpy_array(value)],

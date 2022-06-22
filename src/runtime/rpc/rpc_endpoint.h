@@ -163,9 +163,11 @@ class RPCEndpoint {
    * \param remote_key The remote key of the session
    *   if remote_key equals "%toinit", we need to re-intialize
    *   it by event handler.
+   * \param fcleanup The cleanup Packed function.
    */
   static std::shared_ptr<RPCEndpoint> Create(std::unique_ptr<RPCChannel> channel, std::string name,
-                                             std::string remote_key);
+                                             std::string remote_key,
+                                             TypedPackedFunc<void()> fcleanup = nullptr);
 
  private:
   class EventHandler;
@@ -190,6 +192,8 @@ class RPCEndpoint {
   std::string name_;
   // The remote key
   std::string remote_key_;
+  // Invoked when the RPC session is terminated
+  TypedPackedFunc<void()> fcleanup_;
 };
 
 /*!
@@ -204,6 +208,16 @@ template <typename... Args>
 inline TVMRetValue RPCEndpoint::SysCallRemote(RPCCode code, Args&&... args) {
   return syscall_remote_(static_cast<int>(code), std::forward<Args>(args)...);
 }
+
+/*!
+ * \brief Calculates overhead size of a CopyToRemote packet.
+ * \param to DLTensor to copy.
+ * \param code RPCCode for this transfer.
+ * \param nbytes Number of bytes to transfer.
+ * \return The remote-copy packet overhead size.
+ */
+uint64_t RemoteCopyCalculatePacketOverheadSize(DLTensor* tensor, RPCCode code, uint64_t nbytes);
+
 }  // namespace runtime
 }  // namespace tvm
 #endif  // TVM_RUNTIME_RPC_RPC_ENDPOINT_H_

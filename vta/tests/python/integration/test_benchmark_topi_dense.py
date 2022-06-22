@@ -125,11 +125,17 @@ def run_gemm(
     # Build
     if "vta" in target.keys:
         mod = vta.build(
-            s, [data, kernel, res], target=target, target_host=env.target_host, name="dense"
+            s,
+            [data, kernel, res],
+            target=tvm.target.Target(target, host=env.target_host),
+            name="dense",
         )
     else:
         mod = tvm.build(
-            s, [data, kernel, res], target=target, target_host=env.target_host, name="dense"
+            s,
+            [data, kernel, res],
+            target=tvm.target.Target(target, host=env.target_host),
+            name="dense",
         )
     temp = utils.tempdir()
     mod.save(temp.relpath("dense.o"))
@@ -170,7 +176,7 @@ def run_gemm(
     # Check correctness
     correct = False
     if check_correctness:
-        res_orig = res_arr.asnumpy()
+        res_orig = res_arr.numpy()
         if data_pack:
             res_orig = res_orig.reshape(batch_size, out_feat)
         res_ref = res_ref >> 8

@@ -91,8 +91,12 @@ if env.TARGET == "pynq" or env.TARGET == "de10nano":
     vta.program_fpga(remote, bitstream=None)
 
 # In simulation mode, host the RPC server locally.
-elif env.TARGET == "sim":
+elif env.TARGET in ("sim", "tsim", "intelfocl"):
     remote = rpc.LocalSession()
+
+    if env.TARGET in ["intelfocl"]:
+        # program intelfocl aocx
+        vta.program_fpga(remote, bitstream="vta.bitstream")
 
 ######################################################################
 # Computation Declaration
@@ -307,7 +311,9 @@ print(vta.lower(s, [A, B, C], simple_mode=True))
 # function(including the inputs and outputs) as well as target language
 # we want to compile to.
 #
-my_vadd = vta.build(s, [A, B, C], "ext_dev", env.target_host, name="my_vadd")
+my_vadd = vta.build(
+    s, [A, B, C], tvm.target.Target("ext_dev", host=env.target_host), name="my_vadd"
+)
 
 ######################################################################
 # Saving the Module
@@ -345,7 +351,7 @@ f = remote.load_module("vadd.o")
 # - We first create a remote context (for remote execution on the Pynq).
 # - Then :code:`tvm.nd.array` formats the data accordingly.
 # - :code:`f()` runs the actual computation.
-# - :code:`asnumpy()` copies the result array back in a format that can be
+# - :code:`numpy()` copies the result array back in a format that can be
 #   interpreted.
 #
 
@@ -377,7 +383,7 @@ f(A_nd, B_nd, C_nd)
 # Compute reference result with numpy
 C_ref = (A_orig.astype(env.acc_dtype) + B_orig.astype(env.acc_dtype)).astype(C.dtype)
 C_ref = C_ref.reshape(o, env.BATCH, m, env.BLOCK_OUT).transpose((0, 2, 1, 3))
-np.testing.assert_equal(C_ref, C_nd.asnumpy())
+np.testing.assert_equal(C_ref, C_nd.numpy())
 print("Successful vector add test!")
 
 ######################################################################

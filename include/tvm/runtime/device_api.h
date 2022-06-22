@@ -47,7 +47,8 @@ enum DeviceAttrKind : int {
   kMaxThreadDimensions = 8,
   kMaxRegistersPerBlock = 9,
   kGcnArch = 10,
-  kApiVersion = 11
+  kApiVersion = 11,
+  kDriverVersion = 12
 };
 
 /*! \brief Number of bytes each allocation must align to */
@@ -58,6 +59,10 @@ constexpr int kTempAllocaAlignment = 128;
 
 /*! \brief Maximum size that can be allocated on stack */
 constexpr int kMaxStackAlloca = 1024;
+
+/*! \brief Number of bytes each allocation must align to by default in the workspace buffer to
+ * service intermediate tensors */
+constexpr int kDefaultWorkspaceAlignment = 1;
 
 /*!
  *  \brief TVM Runtime Device API, abstracts the device
@@ -80,6 +85,15 @@ class TVM_DLL DeviceAPI {
    * \sa DeviceAttrKind
    */
   virtual void GetAttr(Device dev, DeviceAttrKind kind, TVMRetValue* rv) = 0;
+
+  /*!
+   * \brief Query the device for specified properties.
+   *
+   * This is used to expand "-from_device=N" in the target string to
+   * all properties that can be determined from that device.
+   */
+  virtual void GetTargetProperty(Device dev, const std::string& property, TVMRetValue* rv) {}
+
   /*!
    * \brief Allocate a data space on device.
    * \param dev The device device to perform operation.
@@ -230,10 +244,10 @@ inline const char* DeviceName(int type) {
   switch (type) {
     case kDLCPU:
       return "cpu";
-    case kDLGPU:
-      return "gpu";
-    case kDLCPUPinned:
-      return "cpu_pinned";
+    case kDLCUDA:
+      return "cuda";
+    case kDLCUDAHost:
+      return "cuda_host";
     case kDLOpenCL:
       return "opencl";
     case kDLSDAccel:
@@ -252,8 +266,6 @@ inline const char* DeviceName(int type) {
       return "ext_dev";
     case kDLWebGPU:
       return "webgpu";
-    case kDLMicroDev:
-      return "micro_dev";
     case kDLHexagon:
       return "hexagon";
     default:
@@ -288,7 +300,14 @@ inline Device RemoveRPCSessionMask(Device dev) {
   return dev;
 }
 
-inline std::ostream& operator<<(std::ostream& os, DLDevice dev);
+inline std::ostream& operator<<(std::ostream& os, DLDevice dev) {  // NOLINT(*)
+  if (tvm::runtime::IsRPCSessionDevice(dev)) {
+    os << "remote[" << tvm::runtime::GetRPCSessionIndex(dev) << "]-";
+    dev = tvm::runtime::RemoveRPCSessionMask(dev);
+  }
+  os << tvm::runtime::DeviceName(static_cast<int>(dev.device_type)) << "(" << dev.device_id << ")";
+  return os;
+}
 
 /*!
  * \brief Add a RPC session mask to a Device.
@@ -305,14 +324,6 @@ inline Device AddRPCSessionMask(Device dev, int session_table_index) {
   return dev;
 }
 
-inline std::ostream& operator<<(std::ostream& os, DLDevice dev) {  // NOLINT(*)
-  if (IsRPCSessionDevice(dev)) {
-    os << "remote[" << GetRPCSessionIndex(dev) << "]-";
-    dev = RemoveRPCSessionMask(dev);
-  }
-  os << runtime::DeviceName(static_cast<int>(dev.device_type)) << "(" << dev.device_id << ")";
-  return os;
-}
 }  // namespace runtime
 }  // namespace tvm
 

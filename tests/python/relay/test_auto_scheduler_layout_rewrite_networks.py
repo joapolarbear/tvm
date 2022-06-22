@@ -117,7 +117,7 @@ def get_relay_dense(m=128, n=128, k=128):
     dtype = "float32"
     d = relay.var("data", shape=(m, k), dtype=dtype)
     w = relay.var("weight", shape=(n, k), dtype=dtype)
-    y = relay.nn.dense(d, w, units=n)
+    y = relay.nn.dense(d, w)
     mod = tvm.IRModule()
     mod["main"] = relay.Function([d, w], y)
     data, weight = get_np_array(d, dtype), get_np_array(w, dtype)
@@ -146,7 +146,7 @@ def tune_and_check(mod, data, weight):
         log_file = fp.name
 
         # Tune tasks
-        tuner = auto_scheduler.TaskScheduler(tasks, task_weights)
+        tuner = auto_scheduler.TaskScheduler(tasks, task_weights, callbacks=[])
         tune_option = auto_scheduler.TuningOptions(
             num_measure_trials=1,
             num_measures_per_round=1,
@@ -173,13 +173,13 @@ def tune_and_check(mod, data, weight):
             module.set_input("data", data)
             module.run()
 
-            return module.get_output(0).asnumpy()
+            return module.get_output(0).numpy()
 
         # Check correctness
         actual_output = get_output(data, lib)
         expected_output = get_output(data, lib2)
 
-        tvm.testing.assert_allclose(actual_output, expected_output, rtol=1e-4, atol=1e-4)
+        tvm.testing.assert_allclose(actual_output, expected_output, rtol=1e-4, atol=2e-4)
 
 
 def test_conv2d():
@@ -188,7 +188,7 @@ def test_conv2d():
 
 
 def test_conv2d_winograd():
-    mod, data, weight = get_relay_conv2d(kh=3, kw=3)
+    mod, data, weight = get_relay_conv2d(outc=128, kh=3, kw=3)
     tune_and_check(mod, data, weight)
 
 

@@ -48,12 +48,15 @@ def cast(data, dtype):
 
 def cast_like(data, dtype_like):
     """Cast input tensor to data type of another tensor.
+
     Parameters
     ----------
     data : relay.Expr
         The input data to the operator.
+
     dtype_like: relay.Expr
         The tensor to cast to.
+
     Returns
     -------
     result : relay.Expr
@@ -93,7 +96,7 @@ def expand_dims(data, axis, num_newaxis=1):
     data : relay.Expr
         The input data to the operator.
 
-    axis : int
+    axis : Union[int, Expr]
         The axis at which the input array is expanded.
         Should lie in range `[-data.ndim - 1, data.ndim]`.
         If `axis < 0`, it is the first axis inserted;
@@ -107,7 +110,13 @@ def expand_dims(data, axis, num_newaxis=1):
     result : relay.Expr
         The reshaped result.
     """
-    return _make.expand_dims(data, axis, num_newaxis)
+    if isinstance(axis, int):
+        return _make.expand_dims(data, axis, num_newaxis)
+    if isinstance(axis, Expr):
+        # TODO (AndrewZhaoLuo): investigate performance issues with consecutive
+        # dynamic expand_dims on non-llvm targets.
+        return _dyn_make.expand_dims(data, axis, num_newaxis)
+    raise ValueError(f"Unknown type for axis: {type(axis)}")
 
 
 def transpose(data, axes=None):
@@ -140,7 +149,7 @@ def squeeze(data, axis=None):
     data : tvm.relay.Expr
         The input data to the operator.
 
-    axis : None or List[int]
+    axis : None or List[int] or Expr
         The set of axes to remove.
         If axis = None, remove all axis of dimensions 1.
         If any specified axis has dimension that does not equal 1, it is an error.
@@ -150,6 +159,10 @@ def squeeze(data, axis=None):
     result : tvm.relay.Expr
         The squeezed result.
     """
+    if isinstance(axis, Constant):
+        axis = list(axis.data.numpy())
+    if isinstance(axis, Expr):
+        return _dyn_make.squeeze(data, axis)
     return _make.squeeze(data, axis)
 
 
@@ -217,7 +230,7 @@ def reshape(data, newshape):
         The reshaped result.
     """
     if isinstance(newshape, Constant):
-        newshape = list(newshape.data.asnumpy())
+        newshape = list(newshape.data.numpy())
     if isinstance(newshape, Expr):
         return _dyn_make.reshape(data, newshape)
     if isinstance(newshape, int):
@@ -310,8 +323,8 @@ def scatter_add(data, indices, updates, axis):
     return _make.scatter_add(data, indices, updates, axis)
 
 
-def scatter_nd(data, indices, out_shape):
-    """Scatter values from an array.
+def scatter_nd(data, indices, updates, mode="update"):
+    """Scatter values from an array and update.
 
     See :py:func:`tvm.topi.scatter` for how data is scattered.
 
@@ -323,15 +336,18 @@ def scatter_nd(data, indices, out_shape):
     indices : relay.Expr
         The index locations to update.
 
-    out_shape : Union[Tuple[int], List[int]]
-        Output shape of the scatter.
+    updates : relay.Expr
+        The values to update.
+
+    mode : string
+        The accumulation mode for scatter. "update" or "add"
 
     Returns
     -------
     ret : relay.Expr
         The computed result.
     """
-    return _make.scatter_nd(data, indices, out_shape)
+    return _make.scatter_nd(data, indices, updates, mode)
 
 
 def reshape_like(data, shape_like, lhs_begin=0, lhs_end=None, rhs_begin=0, rhs_end=None):
@@ -385,7 +401,7 @@ def reshape_like(data, shape_like, lhs_begin=0, lhs_end=None, rhs_begin=0, rhs_e
     return _make.reshape_like(data, shape_like, lhs_begin, lhs_end, rhs_begin, rhs_end)
 
 
-def take(data, indices, axis=None, mode="clip"):
+def take(data, indices, axis=None, batch_dims=0, mode="clip"):
     """Take elements from an array along an axis.
 
     Parameters
@@ -400,6 +416,9 @@ def take(data, indices, axis=None, mode="clip"):
         The axis over which to select values. By default,
         the flattened input array is used.
 
+    batch_dims : int
+        The number of batch dimensions. By default is 0.
+
     mode : str, optional
         Specifies how out-of-bound indices will behave [clip, wrap, fast].
         clip: clip to the range (default).
@@ -411,7 +430,7 @@ def take(data, indices, axis=None, mode="clip"):
     ret : relay.Expr
         The computed result.
     """
-    return _make.take(data, indices, axis, mode)
+    return _make.take(data, indices, batch_dims, axis, mode)
 
 
 def full(fill_value, shape=(), dtype=""):
@@ -434,7 +453,7 @@ def full(fill_value, shape=(), dtype=""):
         The resulting tensor.
     """
     if isinstance(shape, Constant):
-        shape = list(shape.data.asnumpy())
+        shape = list(shape.data.numpy())
     if isinstance(shape, Expr):
         return _dyn_make.full(fill_value, shape, dtype)
     if isinstance(shape, int):
@@ -619,7 +638,7 @@ def tile(data, reps):
     If data.ndim >=  d, reps is promoted to a.ndim by pre-pending 1's to it.
     """
     if isinstance(reps, Constant):
-        reps = list(reps.data.asnumpy())
+        reps = list(reps.data.numpy())
     if isinstance(reps, Expr):
         return _dyn_make.tile(data, reps)
     return _make.tile(data, reps)
@@ -760,7 +779,7 @@ def broadcast_to(data, shape):
         The resulting tensor.
     """
     if isinstance(shape, Constant):
-        shape = list(shape.data.asnumpy())
+        shape = list(shape.data.numpy())
     if isinstance(shape, Expr):
         return _dyn_make.broadcast_to(data, shape)
     if isinstance(shape, int):
@@ -861,7 +880,7 @@ def split(data, indices_or_sections, axis=0):
     return TupleWrapper(_make.split(data, indices_or_sections, axis), ret_size)
 
 
-def strided_slice(data, begin, end, strides=None, slice_mode="end"):
+def strided_slice(data, begin, end, strides=None, axes=None, slice_mode="end"):
     """Strided slice of an array.
 
     Parameters
@@ -879,6 +898,12 @@ def strided_slice(data, begin, end, strides=None, slice_mode="end"):
         Specifies the stride values, it can be negative in that case,
         the input tensor will be reversed in that particular axis.
 
+    axes : Tuple[int] or List[int], optional
+        Axes along which slicing is applied. When it is specified, the length of begin, end,
+        strides, and axes must be equal. Moreover, begin, end, strides, and axes must be
+        static (cannot be relay.Expr). Axes argument for dynamic parameter slicing is
+        not supported yet.
+
     slice_mode : str, optional
         The slice mode [end, size].
         end: The ending indices for the slice [default].
@@ -893,11 +918,11 @@ def strided_slice(data, begin, end, strides=None, slice_mode="end"):
     """
     strides = strides or [1]
     if isinstance(begin, Constant):
-        begin = list(begin.data.asnumpy())
+        begin = list(begin.data.numpy())
     if isinstance(end, Constant):
-        end = list(end.data.asnumpy())
+        end = list(end.data.numpy())
     if isinstance(strides, Constant):
-        strides = list(strides.data.asnumpy())
+        strides = list(strides.data.numpy())
     if isinstance(begin, Expr) or isinstance(end, Expr) or isinstance(strides, Expr):
         if isinstance(begin, (tuple, list)):
             begin = const(list(begin))
@@ -905,14 +930,15 @@ def strided_slice(data, begin, end, strides=None, slice_mode="end"):
             end = const(list(end))
         if isinstance(strides, (tuple, list)):
             strides = const(list(strides))
-        begin = _make.where(
-            begin < cast_like(const(0), begin), begin + cast_like(shape_of(data), begin), begin
-        )
-        begin = _make.where(
-            begin >= cast_like(shape_of(data), begin), cast_like(shape_of(data), begin), begin
-        )
+
+        ishape = cast_like(shape_of(data), begin)
+        ishape_slice = slice_like(ishape, begin)
+        begin = _make.where(begin < cast_like(const(0), begin), begin + ishape_slice, begin)
+        begin = _make.where(begin >= ishape_slice, ishape_slice, begin)
+        # TODO(masahi): Support axes argument in dynamic strided slice
+        assert axes is None, "Axes argument for dynamic parameter slicing is not supported yet."
         return _dyn_make.strided_slice(data, begin, end, strides, slice_mode)
-    return _make.strided_slice(data, begin, end, strides, slice_mode)
+    return _make.strided_slice(data, begin, end, strides, slice_mode, axes)
 
 
 def strided_set(data, v, begin, end, strides=None):
@@ -1067,7 +1093,7 @@ def gather(data, axis, indices):
     return _make.gather(data, axis, indices)
 
 
-def gather_nd(data, indices):
+def gather_nd(data, indices, batch_dims=0, index_rank=None):
     """Gather elements or slices from data and store to a tensor whose shape is
     defined by indices.
 
@@ -1078,6 +1104,13 @@ def gather_nd(data, indices):
 
     indices : relay.Expr
         The shape of output tensor.
+
+    batch_dims : int
+        The number of batch dimensions.
+
+    index_rank : int, optional
+        The size of an indexing tuple, which is a fixed value and the same as indices.shape[0]
+        Only needed when other dimensions of indices are dynamic.
 
     Returns
     -------
@@ -1095,8 +1128,12 @@ def gather_nd(data, indices):
         data = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
         indices = [[0, 1], [1, 0]]
         relay.gather_nd(data, indices) = [[3, 4], [5, 6]]
+
+        data    = [[[0,1],[2,3]],[[4,5],[6,7]]]
+        indices = [[1, 0]]
+        relay.gather_nd(data, indices, batch_dims=1) = [[2,3],[4,5]]
     """
-    return _make.gather_nd(data, indices)
+    return _make.gather_nd(data, indices, batch_dims, index_rank)
 
 
 def sequence_mask(data, valid_length, mask_value=0, axis=0):
@@ -1188,7 +1225,7 @@ def one_hot(indices, on_value, off_value, depth, axis, dtype):
              [0, 0, 1]]
     """
     if isinstance(depth, Constant):
-        depth = depth.data.asnumpy().item()
+        depth = depth.data.numpy().item()
     if isinstance(depth, Expr):
         return _dyn_make.one_hot(indices, on_value, off_value, depth, axis, dtype)
     return _make.one_hot(indices, on_value, off_value, depth, axis, dtype)
@@ -1346,25 +1383,32 @@ def sparse_fill_empty_rows(sparse_indices, sparse_values, dense_shape, default_v
     Fill rows in a sparse matrix that do no contain any values. Values are placed in the first
     column of empty rows. The sparse array is in COO format.
     It returns a TupleWrapper with 3 outputs
+
     Parameters
     ----------
     sparse_indices : relay.Expr
         A 2-D tensor[N, ndims] of integers containing location of sparse values, where N is
         the number of sparse values and n_dim is the number of dimensions of the dense_shape.
         The first column of this relay parameter must be sorted in ascending order.
+
     sparse_values : relay.Expr
         A 1-D tensor[N] containing the sparse values for the sparse indices.
+
     dense_shape : relay.Expr
         A 1-D tensor[ndims] which contains shape of the dense output tensor.
+
     default_value : relay.Expr
         A 1-D tensor[1] containing the default value for the remaining locations.
+
     Returns
     -------
     new_sparse_indices : relay.Expr
         A 2-D tensor[?, ndims] of integers containing location of new sparse
         indices. The first column outputs must be sorted in ascending order.
+
     new_sparse_values : relay.Expr
         A 1-D tensor[?] containing the sparse values for the sparse indices.
+
     empty_row_indicator : relay.Expr
         A 1-D tensor[dense_shape[0]] filled with zeros and ones
         indicating whether the particular row is empty or full respectively
@@ -1380,6 +1424,7 @@ def sparse_fill_empty_rows(sparse_indices, sparse_values, dense_shape, default_v
     Examples
     -------
     .. code-block:: python
+
         sparse_indices = [[0, 1],
                          [0, 3],
                          [2, 0],
@@ -1401,7 +1446,6 @@ def sparse_fill_empty_rows(sparse_indices, sparse_values, dense_shape, default_v
                              [4, 0]]
         empty_row_indicator = [False, True, False, False, True]
         new_sparse_values = [1, 2, 10, 3, 4, 10]
-
     """
     new_sparse_indices, new_sparse_values, empty_row_indicator = TupleWrapper(
         _make.sparse_fill_empty_rows(sparse_indices, sparse_values, dense_shape, default_value), 3
@@ -1433,6 +1477,7 @@ def sparse_reshape(sparse_indices, prev_shape, new_shape):
     Examples
     --------
     .. code-block:: python
+
         sparse_indices = [[0, 0, 0],
                             [0, 0, 1],
                             [0, 1, 0],
@@ -1484,6 +1529,7 @@ def segment_sum(data, segment_ids, num_segments=None):
     Examples
     --------
     .. code-block:: python
+
         data = [[1, 2, 3, 4],
                 [4, -3, 2, -1],
                 [5, 6, 7, 8]]
@@ -1554,6 +1600,7 @@ def cumsum(data, axis=None, dtype=None, exclusive=None):
     Examples
     --------
     .. code-block:: python
+
         a = [[1,2,3], [4,5,6]]
 
         cumsum(a)  # if axis is not provided, cumsum is done over the flattened input.
@@ -1609,6 +1656,7 @@ def cumprod(data, axis=None, dtype=None, exclusive=None):
     Examples
     --------
     .. code-block:: python
+
         a = [[1,2,3], [4,5,6]]
 
         cumprod(a)  # if axis is not provided, cumprod is done over the flattened input.
@@ -1642,7 +1690,7 @@ def unique(data, is_sorted=True, return_counts=False):
     data : relay.Expr
         A 1-D tensor of integers.
 
-    sorted : bool
+    is_sorted : bool
         Whether to sort the unique elements in ascending order before returning as output.
 
     return_counts : bool
@@ -1650,11 +1698,15 @@ def unique(data, is_sorted=True, return_counts=False):
 
     Returns
     -------
-    output : relay.Expr
+    unique : relay.Expr
         A 1-D tensor containing the unique elements of the input data tensor.
 
     indices : relay.Expr
         A 1-D tensor containing the index of each data element in the output tensor.
+
+    inverse_indices : relay.Expr
+        A 1-D tensor. For each entry in data, it contains the index of that data element in the
+        unique array.
 
     num_unique : relay.Expr
         A 1-D tensor with size=1 containing the number of unique elements in the input data tensor.
@@ -1665,22 +1717,52 @@ def unique(data, is_sorted=True, return_counts=False):
     Examples
     --------
     .. code-block:: python
+
         [output, indices, num_unique] = unique([4, 5, 1, 2, 3, 3, 4, 5], False, False)
-        output         =  [4, 5, 1, 2, 3, ?, ?, ?]
+        output         =  [4, 5, 1, 2, 3, _, _, _]
         indices        =  [0, 1, 2, 3, 4, 4, 0, 1]
         num_unique     =  [5]
 
         [output, indices, num_unique, counts] = unique([4, 5, 1, 2, 3, 3, 4, 5], False, True)
-        output         =  [4, 5, 1, 2, 3, ?, ?, ?]
+        output         =  [4, 5, 1, 2, 3, _, _, _]
         indices        =  [0, 1, 2, 3, 4, 4, 0, 1]
         num_unique     =  [5]
-        counts         =  [2, 2, 1, 1, 2, ?, ?, ?]
+        counts         =  [2, 2, 1, 1, 2, _, _, _]
 
         [output, indices, num_unique] = unique([4, 5, 1, 2, 3, 3, 4, 5], True)
-        output         =  [1, 2, 3, 4, 5, ?, ?, ?]
+        output         =  [1, 2, 3, 4, 5, _, _, _]
         indices        =  [3, 4, 0, 1, 2, 2, 3, 4]
         num_unique     =  [5]
     """
     if return_counts:
-        return TupleWrapper(_make.unique(data, is_sorted, return_counts), 4)
-    return TupleWrapper(_make.unique(data, is_sorted, return_counts), 3)
+        return TupleWrapper(_make.unique(data, is_sorted, return_counts), 5)
+    return TupleWrapper(_make.unique(data, is_sorted, return_counts), 4)
+
+
+def invert_permutation(data):
+    """Computes the inverse permutation of data.
+    This operation computes the inverse of an index permutation.
+    It takes a 1-D integer tensor x, which represents the indices of a zero-based
+    array and swaps each value with its index position.
+
+    For an output tensor y and an input tensor x, this operation computes the following:
+    y[x[i]] = i for i in [0, 1, ..., len(x) - 1]
+
+    Parameters
+    ----------
+    data : relay.Expr
+        The source data to be invert permuated.
+
+    Returns
+    -------
+    ret : relay.Expr
+        Invert permuated data. Has the same type as data.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        data = [3, 4, 0, 2, 1]
+        relay.invert_permutation(data) = [2, 4, 3, 0, 1]
+    """
+    return _make.invert_permutation(data)

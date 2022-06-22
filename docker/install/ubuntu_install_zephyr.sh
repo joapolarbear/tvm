@@ -41,23 +41,22 @@ sudo apt-get update
 
 sudo apt-get install -y cmake
 
-#mkdir /opt/west
-#python3.6 -mvenv /opt/west  # NOTE: include .6 to make a python3.6 link for west/cmake.
-#/opt/west/bin/pip3 install west
 pip3 install west
 
-#cat <<EOF | tee /usr/local/bin/west >/dev/null
-##!/bin/bash -e
-#
-#source /opt/west/bin/activate
-#export ZEPHYR_BASE=/opt/zephyrproject/zephyr
-#west "\$@"
-#EOF
-#chmod a+x /usr/local/bin/west
+# Init ZephyrProject
+# To keep in sync with the version 
+# defined in apps/microtvm/zephyr/template_project/microtvm_api_server.py
+# We use `-branch` tag since it tracks the same version with extra patches for bugs.
+ZEPHYR_VERSION="v2.5-branch"
+ZEPHYR_PROJECT_PATH=/opt/zephyrproject
+ZEPHYR_INIT_SCRIPT=$(find -name "ubuntu_init_zephyr_project.sh")
+bash ${ZEPHYR_INIT_SCRIPT} ${ZEPHYR_PROJECT_PATH} ${ZEPHYR_VERSION}
+cd ${ZEPHYR_PROJECT_PATH}
 
-west init --mr v2.4.0 /opt/zephyrproject
-cd /opt/zephyrproject
-west update
+# As part of the build process, Zephyr needs to touch some symlinks in zephyr/misc/generated/syscalls_links (this path is relative to the
+# build directory for a project). Mark the zephyr installation world-writable since this is a docker
+# container
+chmod -R o+w ${ZEPHYR_PROJECT_PATH}
 
 # This step is required because of the way docker/bash.sh works. It sets the user home directory to
 # /workspace (or the TVM root, anyhow), and this means that zephyr expects a ~/.cache directory to be
@@ -67,13 +66,12 @@ west update
 mkdir zephyr/.cache
 chmod o+rwx zephyr/.cache
 
-west zephyr-export
-
 #/opt/west/bin/pip3 install -r /opt/zephyrproject/zephyr/scripts/requirements.txt
 pip3 install -r /opt/zephyrproject/zephyr/scripts/requirements.txt
 
-SDK_VERSION=0.11.3
-wget --no-verbose \
-     https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${SDK_VERSION}/zephyr-sdk-${SDK_VERSION}-setup.run
-chmod +x zephyr-sdk-${SDK_VERSION}-setup.run
-./zephyr-sdk-${SDK_VERSION}-setup.run -- -d /opt/zephyr-sdk
+ZEPHYR_SDK_VERSION=0.12.3
+ZEPHYR_SDK_FILE=zephyr-sdk-linux-setup.run
+wget --no-verbose -O $ZEPHYR_SDK_FILE \
+    https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${ZEPHYR_SDK_VERSION}/zephyr-sdk-${ZEPHYR_SDK_VERSION}-x86_64-linux-setup.run
+chmod +x $ZEPHYR_SDK_FILE
+"./$ZEPHYR_SDK_FILE" -- -d /opt/zephyr-sdk

@@ -379,7 +379,7 @@ class ProxyServerHandler(object):
 
             if need_update_info:
                 keylist = "[" + ",".join(self._key_set) + "]"
-                cinfo = {"key": "server:proxy" + keylist}
+                cinfo = {"key": "server:proxy" + keylist, "addr": [None, self._listen_port]}
                 base.sendjson(self._tracker_conn, [TrackerCode.UPDATE_INFO, cinfo])
                 assert base.recvjson(self._tracker_conn) == TrackerCode.SUCCESS
             self._tracker_pending_puts = []
@@ -512,7 +512,7 @@ class PopenProxyServerState(object):
                 self.port = my_port
                 break
             except socket.error as sock_err:
-                if sock_err.errno in [98, 48]:
+                if sock_err.errno in [errno.EADDRINUSE]:
                     continue
                 raise sock_err
         if not self.port:
@@ -537,7 +537,7 @@ class PopenProxyServerState(object):
         self.thread.start()
 
 
-def _popen_start_server(
+def _popen_start_proxy_server(
     host,
     port=9091,
     port_end=9199,
@@ -570,7 +570,7 @@ def _popen_start_server(
 class Proxy(object):
     """Start RPC proxy server on a seperate process.
 
-    Python implementation based on multi-processing.
+    Python implementation based on PopenWorker.
 
     Parameters
     ----------
@@ -618,7 +618,7 @@ class Proxy(object):
         self.proc = PopenWorker()
         # send the function
         self.proc.send(
-            _popen_start_server,
+            _popen_start_proxy_server,
             [
                 host,
                 port,

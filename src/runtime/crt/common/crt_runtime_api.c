@@ -31,8 +31,6 @@
 #include <tvm/runtime/crt/func_registry.h>
 #include <tvm/runtime/crt/internal/common/ndarray.h>
 #include <tvm/runtime/crt/internal/graph_executor/graph_executor.h>
-#include <tvm/runtime/crt/internal/memory/memory.h>
-#include <tvm/runtime/crt/memory.h>
 #include <tvm/runtime/crt/platform.h>
 
 // Handle internal errors
@@ -129,6 +127,15 @@ int TVMDeviceCopyDataFromTo(DLTensor* from, DLTensor* to, TVMStreamHandle stream
   return 0;
 }
 
+int TVMStreamCreate(int device_type, int device_id, TVMStreamHandle* out) {
+  out = NULL;
+  return 0;
+}
+
+int TVMStreamFree(int device_type, int device_id, TVMStreamHandle stream) { return 0; }
+
+int TVMSetStream(int device_type, int device_id, TVMStreamHandle stream) { return 0; }
+
 int TVMSynchronize(int device_type, int device_id, TVMStreamHandle stream) { return 0; }
 
 static TVMMutableFuncRegistry global_func_registry;
@@ -176,7 +183,16 @@ int TVMModCreateFromCModule(const TVMModule* mod, TVMModuleHandle* out_handle) {
   return -1;
 }
 
+static const TVMModuleHandle kTVMModuleHandleUninitialized = (TVMModuleHandle)(~0UL);
+
+static TVMModuleHandle system_lib_handle;
+
 int TVMModFree(TVMModuleHandle mod) {
+  /* Never free system_lib_handler */
+  if (mod == system_lib_handle && system_lib_handle != kTVMModuleHandleUninitialized) {
+    return 0;
+  }
+
   tvm_module_index_t module_index;
   if (DecodeModuleHandle(mod, &module_index) != 0) {
     return -1;
@@ -185,10 +201,6 @@ int TVMModFree(TVMModuleHandle mod) {
   registered_modules[module_index] = NULL;
   return 0;
 }
-
-static const TVMModuleHandle kTVMModuleHandleUninitialized = (TVMModuleHandle)(~0UL);
-
-static TVMModuleHandle system_lib_handle;
 
 int SystemLibraryCreate(TVMValue* args, int* type_codes, int num_args, TVMValue* ret_val,
                         int* ret_type_codes) {
@@ -298,8 +310,14 @@ static tvm_crt_error_t FindFunctionOrSetAPIError(tvm_module_index_t module_index
 }
 
 int TVMFuncGetGlobal(const char* name, TVMFunctionHandle* out) {
-  return FindFunctionOrSetAPIError(kGlobalFuncModuleIndex, &global_func_registry.registry, name,
-                                   out);
+  tvm_crt_error_t to_return =
+      FindFunctionOrSetAPIError(kGlobalFuncModuleIndex, &global_func_registry.registry, name, out);
+  // For compatibility with the C++ runtime equivalent, in src/runtime/registry.cc.
+  if (to_return == kTvmErrorFunctionNameNotFound) {
+    *out = NULL;
+    to_return = kTvmErrorNoError;
+  }
+  return to_return;
 }
 
 int TVMModGetFunction(TVMModuleHandle mod, const char* func_name, int query_imports,
@@ -343,7 +361,6 @@ int ModuleGetFunction(TVMValue* args, int* type_codes, int num_args, TVMValue* r
   if (to_return == kTvmErrorFunctionNameNotFound) {
     to_return = kTvmErrorNoError;
   }
-
   return to_return;
 }
 
@@ -372,23 +389,29 @@ int TVMFuncFree(TVMFunctionHandle func) {
 
 int RPCTimeEvaluator(TVMValue* args, int* type_codes, int num_args, TVMValue* ret_val,
                      int* ret_type_code);
+
+// Sends CRT max packet size.
+int RPCGetCRTMaxPacketSize(TVMValue* args, int* type_codes, int num_args, TVMValue* ret_value,
+                           int* ret_type_codes) {
+  // 11 bytes is for microtvm overhead:
+  // packet start(2), length(4), session header(3), crc(2)
+  ret_value[0].v_int64 = TVM_CRT_MAX_PACKET_SIZE_BYTES - 11;
+  ret_type_codes[0] = kTVMArgInt;
+  return 0;
+}
+
+int TVMContribRandomFill(TVMValue* args, int* type_codes, int num_args, TVMValue* ret_val,
+                         int* ret_type_code);
 tvm_crt_error_t TVMInitializeRuntime() {
   int idx = 0;
   tvm_crt_error_t error = kTvmErrorNoError;
-  void* func_registry_memory = NULL;
 
   DLDevice dev = {kDLCPU, 0};
-  error = TVMPlatformMemoryAllocate(TVM_CRT_GLOBAL_FUNC_REGISTRY_SIZE_BYTES, dev,
-                                    &func_registry_memory);
-  if (error != kTvmErrorNoError) {
-    return error;
-  }
 
   void* registry_backing_memory;
   error = TVMPlatformMemoryAllocate(TVM_CRT_GLOBAL_FUNC_REGISTRY_SIZE_BYTES, dev,
                                     &registry_backing_memory);
   if (error != kTvmErrorNoError) {
-    TVMPlatformMemoryFree(func_registry_memory, dev);
     return error;
   }
 
@@ -412,9 +435,16 @@ tvm_crt_error_t TVMInitializeRuntime() {
     error = TVMFuncRegisterGlobal("runtime.RPCTimeEvaluator", &RPCTimeEvaluator, 0);
   }
 
+  if (error == kTvmErrorNoError) {
+    error = TVMFuncRegisterGlobal("tvm.rpc.server.GetCRTMaxPacketSize", &RPCGetCRTMaxPacketSize, 0);
+  }
+
+  if (error == kTvmErrorNoError) {
+    error = TVMFuncRegisterGlobal("tvm.contrib.random.random_fill", &TVMContribRandomFill, 0);
+  }
+
   if (error != kTvmErrorNoError) {
     TVMPlatformMemoryFree(registry_backing_memory, dev);
-    TVMPlatformMemoryFree(func_registry_memory, dev);
   }
 
   return error;
@@ -543,4 +573,21 @@ release_and_return : {
 // Default implementation, overridden by the platform runtime.
 __attribute__((weak)) tvm_crt_error_t TVMPlatformGenerateRandom(uint8_t* buffer, size_t num_bytes) {
   return kTvmErrorFunctionCallNotImplemented;
+}
+
+// Fill the tensor in args[0] with random data using TVMPlatformGenerateRandom.
+// Named to correspond with the analogous function in the C++ runtime.
+int TVMContribRandomFill(TVMValue* args, int* type_codes, int num_args, TVMValue* ret_val,
+                         int* ret_type_code) {
+  if (num_args != 1) {
+    return kTvmErrorFunctionCallNumArguments;
+  }
+
+  if (type_codes[0] != kTVMDLTensorHandle) {
+    return kTvmErrorFunctionCallWrongArgType;
+  }
+
+  DLTensor* tensor = (DLTensor*)args[0].v_handle;
+  TVMNDArray arr = {*tensor};
+  return TVMNDArray_RandomFill(&arr);
 }

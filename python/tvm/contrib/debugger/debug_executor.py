@@ -19,12 +19,13 @@
 import os
 import tempfile
 import shutil
+import logging
 import tvm._ffi
 
 from tvm._ffi.base import string_types
 from tvm.contrib import graph_executor
-from tvm.runtime.ndarray import array
 from . import debug_result
+from ...runtime.profiling import Report
 
 _DUMP_ROOT_PREFIX = "tvmdbg_"
 _DUMP_PATH_PREFIX = "_tvmdbg_"
@@ -64,8 +65,7 @@ def create(graph_json_str, libmod, device, dump_root=None):
             fcreate = tvm._ffi.get_global_func("tvm.graph_executor_debug.create")
     except ValueError:
         raise ValueError(
-            "Please set '(USE_GRAPH_EXECUTOR_DEBUG ON)' in "
-            "config.cmake and rebuild TVM to enable debug mode"
+            "Please set '(USE_PROFILER ON)' in " "config.cmake and rebuild TVM to enable debug mode"
         )
     func_obj = fcreate(graph_json_str, libmod, *device_type_id)
     return GraphModuleDebug(func_obj, dev, graph_json_str, dump_root)
@@ -98,9 +98,12 @@ class GraphModuleDebug(graph_executor.GraphModule):
     def __init__(self, module, device, graph_json_str, dump_root):
         self._dump_root = dump_root
         self._dump_path = None
-        self._get_output_by_layer = module["get_output_by_layer"]
         self._run_individual = module["run_individual"]
+        self._debug_get_output = module["debug_get_output"]
+        self._execute_node = module["execute_node"]
+        self._get_node_output = module["get_node_output"]
         self._profile = module["profile"]
+        self._profile_rpc = module["profile_rpc"]
         graph_executor.GraphModule.__init__(self, module)
         self._create_debug_env(graph_json_str, device)
 
@@ -170,19 +173,51 @@ class GraphModuleDebug(graph_executor.GraphModule):
         # init the debug dumping environment
         self.debug_datum = debug_result.DebugResult(graph_json, self._dump_path)
 
+    def _execute_next_node(self, node_index, output_index):
+        """Execute node assuming all previous nodes has been executed.
+        Return the output of this node.
+
+        Parameters
+        ----------
+        node_index : int
+            The node index
+        output_index: int
+            The node output index
+        Return
+        ------
+        output_tensors : Array<NDarray>
+            Array of output tensors
+        """
+        output_tensors = self._execute_next_node_get_output(node_index, output_index)
+        return output_tensors
+
+    def _run_per_layer(self):
+        """Execute up to each node and each debug output will be
+        copied to the buffer.
+
+        """
+        output_tensors = []
+        for i, node in enumerate(self.debug_datum.get_graph_nodes()):
+            self._execute_node(i)
+            num_outputs = self.debug_datum.get_graph_node_output_num(node)
+            for j in range(num_outputs):
+                logging.info(
+                    "running node=%d, output_ind=%d, with node_name: %s", i, j, node["name"]
+                )
+                output_tensors.append(self._get_node_output(i, j))
+        self.debug_datum.update_output_tensors(output_tensors)
+
     def _run_debug(self):
         """Execute the node specified with index will be executed.
         Each debug output will be copied to the buffer
         Time consumed for each execution will be set as debug output.
 
         """
+        # Get timing.
         self.debug_datum._time_list = [[float(t)] for t in self.run_individual(10, 1, 1)]
-        for i, node in enumerate(self.debug_datum.get_graph_nodes()):
-            num_outputs = self.debug_datum.get_graph_node_output_num(node)
-            for j in range(num_outputs):
-                out_tensor = self._get_output_by_layer(i, j)
-                out_tensor = array(out_tensor)
-                self.debug_datum._output_tensor_list.append(out_tensor)
+
+        # Get outputs.
+        self._run_per_layer()
 
     def debug_get_output(self, node, out=None):
         """Run graph up to node and get the output to out
@@ -196,20 +231,19 @@ class GraphModuleDebug(graph_executor.GraphModule):
             The output array container
         """
         if isinstance(node, str):
-            output_tensors = self.debug_datum.get_output_tensors()
-            try:
-                out = output_tensors[node]
-            except KeyError:
-                node_list = output_tensors.keys()
-                raise RuntimeError(
-                    "Node " + node + " not found, available nodes are: " + str(node_list) + "."
-                )
+            node_index = None
+            for i, graph_node in enumerate(self.debug_datum.get_graph_nodes()):
+                if graph_node["name"] == node:
+                    node_index = i
+                    break
+            else:
+                raise AttributeError(f"Could not find a node named {node} in this graph.")
         elif isinstance(node, int):
-            output_tensors = self.debug_datum._output_tensor_list
-            out = output_tensors[node]
+            node_index = node
         else:
-            raise RuntimeError("Require node index or name only.")
-        return out
+            raise RuntimeError(f"Require node index or name only.")
+
+        self._debug_get_output(node_index, out)
 
     def run(self, **input_dict):
         """Run forward execution of the graph with debug
@@ -235,14 +269,18 @@ class GraphModuleDebug(graph_executor.GraphModule):
         ret = self._run_individual(number, repeat, min_repeat_ms)
         return ret.strip(",").split(",") if ret else []
 
-    def profile(self, **input_dict):
+    def profile(self, collectors=None, **input_dict):
         """Run forward execution of the graph and collect overall and per-op
         performance metrics.
 
         Parameters
         ----------
+        collectors : Optional[Sequence[MetricCollector]]
+            Extra metrics to collect. If profiling over RPC, collectors must be `None`.
+
         input_dict : dict of str to NDArray
             List of input values to be feed to
+
         Return
         ------
         timing_results : str
@@ -251,7 +289,11 @@ class GraphModuleDebug(graph_executor.GraphModule):
         if input_dict:
             self.set_input(**input_dict)
 
-        return self._profile()
+        if self.module.type_key == "rpc":
+            # We cannot serialize MetricCollectors over RPC
+            assert collectors is None, "Profiling with collectors is not supported over RPC"
+            return Report.from_json(self._profile_rpc())
+        return self._profile(collectors)
 
     def exit(self):
         """Exits the dump folder and all its contents"""

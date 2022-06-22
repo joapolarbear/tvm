@@ -15,12 +15,18 @@
 # specific language governing permissions and limitations
 # under the License.
 import numpy as np
+import pytest
+from unittest.mock import patch
 
 import tvm
+import json
 from tvm import relay
 from tvm.contrib import graph_executor
 from tvm.relay.op import add
 import tvm.testing
+from tvm.relay.testing import mlp
+from tvm import rpc
+from tvm.contrib import utils
 
 # @tq, @jr should we put this in testing ns?
 def check_rts(expr, args, expected_result, mod=None):
@@ -39,27 +45,48 @@ def check_rts(expr, args, expected_result, mod=None):
     expected_result:
         The expected result of running the expression.
     """
-    intrp = relay.create_executor("debug", mod=mod)
-    graph = relay.create_executor("graph", mod=mod)
-    eval_result = intrp.evaluate(expr)(*args)
-    rts_result = graph.evaluate(expr)(*args)
-    tvm.testing.assert_allclose(eval_result.asnumpy(), rts_result.asnumpy())
-    tvm.testing.assert_allclose(eval_result.asnumpy(), expected_result)
+    eval_result = relay.create_executor("debug", mod=mod).evaluate(expr)(*args)
+    rts_result = relay.create_executor("graph", mod=mod).evaluate(expr)(*args)
+    tvm.testing.assert_allclose(eval_result.numpy(), rts_result.numpy())
+    tvm.testing.assert_allclose(eval_result.numpy(), expected_result)
 
 
 def test_add_op_scalar():
     """
-    Program:
+    test_add_op_scalar:
         fn (x, y) {
             return x + y;
         }
     """
-    x = relay.var("x", shape=())
-    y = relay.var("y", shape=())
+    x = relay.var("x", shape=())  # Default to float32
+    y = relay.var("y", shape=())  # Default to float32
     func = relay.Function([x, y], add(x, y))
-    x_data = np.array(10.0, dtype="float32")
-    y_data = np.array(1.0, dtype="float32")
-    check_rts(func, [x_data, y_data], x_data + y_data)
+    x_y_data = [
+        (np.array(10.0, dtype="float32"), np.array(1.0, dtype="float32")),
+        (np.float32(10.0), np.float32(1.0)),
+        (10.0, 1.0),
+    ]
+    for (x_data, y_data) in x_y_data:
+        check_rts(func, [x_data, y_data], x_data + y_data)
+
+
+def test_add_op_scalar_int():
+    """
+    test_add_op_scalar_int:
+        fn (x, y) {
+            return x + y;
+        }
+    """
+    x = relay.var("x", shape=(), dtype="int32")
+    y = relay.var("y", shape=(), dtype="int32")
+    func = relay.Function([x, y], add(x, y))
+    x_y_data = [
+        (np.array(10.0, dtype="int32"), np.array(1.0, dtype="int32")),
+        (np.int32(10), np.int32(1)),
+        (10, 1),
+    ]
+    for (x_data, y_data) in x_y_data:
+        check_rts(func, [x_data, y_data], x_data + y_data)
 
 
 def test_add_op_tensor():
@@ -106,7 +133,7 @@ def test_with_params():
     mod.set_input(**params)
     mod.set_input(x=x_data)
     mod.run()
-    res = mod.get_output(0).asnumpy()
+    res = mod.get_output(0).numpy()
     ref_res = np.exp(y_data + x_data)
     tvm.testing.assert_allclose(res, ref_res, atol=1e-5, rtol=1e-5)
 
@@ -129,21 +156,77 @@ def test_plan_memory():
     mod = relay.transform.FuseOps(0)(mod)
     func = mod["main"]
     mod = relay.transform.InferType()(mod)
-    smap = relay.backend._backend.GraphPlanMemory(func)
+    memory_plan = relay.backend._backend.GraphPlanMemory(func)
     storage_ids = set()
     device_types = set()
-    for k, v in smap.items():
-        assert len(v) == 2
-        for x in v[0]:
-            storage_ids.add(x.value)
-        for x in v[1]:
-            device_types.add(x.value)
+    storage_sizes = {}
+
+    for k, v in memory_plan.expr_to_storage_info.items():
+        for x in v.storage_ids:
+            storage_ids.add(x)
+            storage_sizes[x] = v.storage_sizes
+        for x in v.device_types:
+            device_types.add(x)
 
     # Current rule requires vars have unique storage id
     # because we don't do inplace, we will need another
     # two alternating temporary space.
-    assert len(storage_ids) == 4
+    assert len(storage_ids) == 4, f"found storage_ids: {storage_ids}"
     assert len(device_types) == 1
+    assert len(storage_sizes) == 4
+
+    # Check the specific size of each sid
+    assert (
+        storage_sizes[0][0] == 40
+        and storage_sizes[1][0] == 4
+        and storage_sizes[2][0] == 4
+        and storage_sizes[3][0] == 40
+    )
+
+
+def test_reshape_nop():
+    # test that reshape can be turned into nop
+    x = relay.var("x", shape=(10, 4))
+    xx = relay.abs(x)
+    y = relay.expand_dims(xx, axis=1)
+    t0 = relay.reshape(y, (1, 40))
+    t1 = relay.abs(y)
+
+    z0 = relay.reshape(t0, (2, 20))
+    z1 = relay.sqrt(t1)
+    z2 = relay.reshape(t1, (1, 40))
+
+    func = relay.Function([x], relay.Tuple([z0, z1, z2]))
+    x_data = np.random.rand(10, 4).astype("float32")
+    graph = relay.build(tvm.IRModule.from_expr(func), "llvm")
+    graph_json_str = graph.get_graph_json()
+
+    graph_json = json.loads(graph_json_str)
+
+    # reshape must force sharing memory
+    storage_ids = graph_json["attrs"]["storage_id"][1]
+    assert tuple(storage_ids) == (0, 1, 1, 2, 3, 2)
+    assert graph_json["nodes"][2]["attrs"]["func_name"] == "__nop"
+    assert graph_json["nodes"][5]["attrs"]["func_name"] == "__nop"
+
+    gmod = graph_executor.GraphModule(graph["default"](tvm.cpu(0)))
+
+    gmod.set_input(x=x_data)
+    gmod.run()
+    z0_np = x_data.reshape(2, 20)
+    z1_np = np.sqrt(
+        np.abs(
+            x_data.reshape(
+                10,
+                1,
+                4,
+            )
+        )
+    )
+    z2_np = np.abs(x_data).reshape(1, 40)
+    tvm.testing.assert_allclose(gmod.get_output(0).numpy(), z0_np)
+    tvm.testing.assert_allclose(gmod.get_output(1).numpy(), z1_np)
+    tvm.testing.assert_allclose(gmod.get_output(2).numpy(), z2_np)
 
 
 @tvm.testing.uses_gpu
@@ -179,7 +262,7 @@ def test_gru_like():
             m.set_input("y", tvm.nd.array(y.astype(dtype)))
             m.set_input(**params)
             m.run()
-            out = m.get_output(0, tvm.nd.empty(out_shape, dtype)).asnumpy()
+            out = m.get_output(0, tvm.nd.empty(out_shape, dtype)).numpy()
             ref = unit_numpy(x, y)
             tvm.testing.assert_allclose(out, ref, rtol=1e-5, atol=1e-5)
 
@@ -204,7 +287,7 @@ def test_compile_nested_tuples():
 
     ref = x_data + 1
     for i in range(mod.get_num_outputs()):
-        out = mod.get_output(i).asnumpy()
+        out = mod.get_output(i).numpy()
         tvm.testing.assert_allclose(out, ref, rtol=1e-5, atol=1e-5)
         ref = ref + 1
 
@@ -214,27 +297,92 @@ def test_graph_executor_nested_tuples():
     out = relay.Tuple([x, relay.Tuple([y, relay.Tuple([z, w])])])
     func = relay.Function([x, y, z, w], out)
 
-    exe = relay.create_executor(
+    f = relay.create_executor(
         kind="graph", mod=tvm.IRModule.from_expr(func), device=tvm.cpu(0), target="llvm"
-    )
-    f = exe.evaluate()
+    ).evaluate()
 
     data = [np.random.uniform(size=(2, 3)).astype("float32") for _ in "xyzw"]
     out = f(*data)
     assert len(out) == 2
-    tvm.testing.assert_allclose(out[0].asnumpy(), data[0])
+    tvm.testing.assert_allclose(out[0].numpy(), data[0])
     assert len(out[1]) == 2
-    tvm.testing.assert_allclose(out[1][0].asnumpy(), data[1])
+    tvm.testing.assert_allclose(out[1][0].numpy(), data[1])
     assert len(out[1][1]) == 2
-    tvm.testing.assert_allclose(out[1][1][0].asnumpy(), data[2])
-    tvm.testing.assert_allclose(out[1][1][1].asnumpy(), data[3])
+    tvm.testing.assert_allclose(out[1][1][0].numpy(), data[2])
+    tvm.testing.assert_allclose(out[1][1][1].numpy(), data[3])
+
+
+def test_graph_executor_api():
+    dname_0, dname_1 = "data_0", "data_1"
+    data_0, data_1 = [relay.var(c, shape=(1, 1), dtype="float32") for c in [dname_0, dname_1]]
+    net = relay.add(data_0, data_1)
+    func = relay.Function((data_0, data_1), net)
+
+    lib = relay.build(tvm.IRModule.from_expr(func), "llvm")
+    mod = graph_executor.GraphModule(lib["default"](tvm.cpu(0)))
+
+    assert mod.get_input_index(dname_1) == 1
+    assert mod.get_input_index(dname_0) == 0
+    assert mod.get_input_index("Invalid") == -1
+
+
+@tvm.testing.requires_llvm
+def test_benchmark():
+    mod, params = mlp.get_workload(1)
+    lib = relay.build(mod, target="llvm", params=params)
+    exe = graph_executor.create(lib.get_graph_json(), lib.lib, tvm.cpu())
+    data = tvm.nd.array(np.random.rand(1, 1, 28, 28).astype("float32"))
+    result = exe.benchmark(tvm.cpu(), data=data, func_name="run", repeat=2, number=1)
+    assert result.mean == result.median
+    assert result.mean > 0
+    assert len(result.results) == 2
+
+    with patch.object(
+        tvm.runtime.module.Module,
+        "time_evaluator",
+        return_value=lambda: tvm.runtime.module.BenchmarkResult([1, 2, 2, 5]),
+    ) as method:
+        result = exe.benchmark(tvm.cpu(), data=data, func_name="run", repeat=2, number=1)
+        assert result.mean == 2.5
+        assert result.median == 2.0
+        assert result.max == 5
+        assert result.min == 1
+        assert result.std == 1.5
+
+
+@tvm.testing.parametrize_targets("cuda", "llvm")
+def test_benchmark_end_to_end(dev, target):
+    mod, params = mlp.get_workload(1)
+    lib = relay.build(mod, target=target, params=params)
+    exe = graph_executor.create(lib.get_graph_json(), lib.lib, dev)
+    data = tvm.nd.array(np.random.rand(1, 1, 28, 28).astype("float32"))
+    result = exe.benchmark(dev, data=data, func_name="run", repeat=2, number=1, end_to_end=True)
+    assert result.mean > 0
+    assert len(result.results) == 2
+
+
+@tvm.testing.requires_cuda
+def test_benchmark_end_to_end_rpc():
+    server = rpc.Server("127.0.0.1")
+    remote = rpc.connect(server.host, server.port)
+
+    mod, params = mlp.get_workload(1)
+    lib = relay.build(mod, target="cuda", params=params)
+
+    temp = utils.tempdir()
+    path = temp.relpath("library.so")
+    lib.export_library(path)
+    remote.upload(path)
+    rlib = remote.load_module("library.so")
+
+    dev = remote.device("cuda")
+    exe = graph_executor.create(lib.get_graph_json(), rlib, dev)
+
+    data = tvm.nd.array(np.random.rand(1, 1, 28, 28).astype("float32"), device=dev)
+    result = exe.benchmark(dev, data=data, func_name="run", repeat=2, number=1, end_to_end=True)
+    assert result.mean > 0
+    assert len(result.results) == 2
 
 
 if __name__ == "__main__":
-    test_plan_memory()
-    test_with_params()
-    test_add_op_scalar()
-    test_add_op_tensor()
-    test_add_op_broadcast()
-    test_gru_like()
-    test_compile_nested_tuples()
+    pytest.main([__file__])

@@ -369,7 +369,9 @@ print(vta.lower(s, [data, kernel, res], simple_mode=True))
 from tvm.topi.testing import conv2d_nchw_python
 
 # Compile the TVM module
-my_conv = vta.build(s, [data, kernel, res], "ext_dev", env.target_host, name="my_conv")
+my_conv = vta.build(
+    s, [data, kernel, res], tvm.target.Target("ext_dev", host=env.target_host), name="my_conv"
+)
 temp = utils.tempdir()
 my_conv.save(temp.relpath("conv2d.o"))
 remote.upload(temp.relpath("conv2d.o"))
@@ -434,7 +436,7 @@ res_ref = res_ref.reshape(
         fout_width,
     )
 ).transpose((0, 2, 4, 5, 1, 3))
-tvm.testing.assert_allclose(res_ref, res_nd.asnumpy())
+tvm.testing.assert_allclose(res_ref, res_nd.numpy())
 
 # Print stats
 if env.TARGET in ["sim", "tsim"]:

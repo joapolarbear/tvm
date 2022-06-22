@@ -52,8 +52,8 @@ elseif(PYTHON)
   # Fast simulator driver build
   if(USE_VTA_FSIM)
     # Add fsim driver sources
-    file(GLOB FSIM_RUNTIME_SRCS ${VTA_HW_PATH}/src/*.cc)
-    file(GLOB FSIM_RUNTIME_SRCS vta/runtime/*.cc)
+    tvm_file_glob(GLOB FSIM_RUNTIME_SRCS ${VTA_HW_PATH}/src/*.cc)
+    tvm_file_glob(GLOB FSIM_RUNTIME_SRCS vta/runtime/*.cc)
     list(APPEND FSIM_RUNTIME_SRCS ${VTA_HW_PATH}/src/sim/sim_driver.cc)
     list(APPEND FSIM_RUNTIME_SRCS ${VTA_HW_PATH}/src/sim/sim_tlpp.cc)
     list(APPEND FSIM_RUNTIME_SRCS ${VTA_HW_PATH}/src/vmem/virtual_memory.cc)
@@ -73,15 +73,26 @@ elseif(PYTHON)
 
   # Cycle accurate simulator driver build
   if(USE_VTA_TSIM)
+    if(DEFINED ENV{VERILATOR_INC_DIR})
+      set(VERILATOR_INC_DIR $ENV{VERILATOR_INC_DIR})
+    elseif (EXISTS /usr/local/share/verilator/include)
+      set(VERILATOR_INC_DIR /usr/local/share/verilator/include)
+    elseif (EXISTS /usr/share/verilator/include)
+      set(VERILATOR_INC_DIR /usr/share/verilator/include)
+    else()
+      message(STATUS "Verilator not found in /usr/local/share/verilator/include")
+      message(STATUS "Verilator not found in /usr/share/verilator/include")
+      message(FATAL_ERROR "Cannot find Verilator, VERILATOR_INC_DIR is not defined")
+    endif()
     # Add tsim driver sources
-    file(GLOB TSIM_RUNTIME_SRCS ${VTA_HW_PATH}/src/*.cc)
-    file(GLOB TSIM_RUNTIME_SRCS vta/runtime/*.cc)
+    tvm_file_glob(GLOB TSIM_RUNTIME_SRCS ${VTA_HW_PATH}/src/*.cc)
+    tvm_file_glob(GLOB TSIM_RUNTIME_SRCS vta/runtime/*.cc)
     list(APPEND TSIM_RUNTIME_SRCS ${VTA_HW_PATH}/src/tsim/tsim_driver.cc)
     list(APPEND TSIM_RUNTIME_SRCS ${VTA_HW_PATH}/src/dpi/module.cc)
     list(APPEND TSIM_RUNTIME_SRCS ${VTA_HW_PATH}/src/vmem/virtual_memory.cc)
     # Target lib: vta_tsim
     add_library(vta_tsim SHARED ${TSIM_RUNTIME_SRCS})
-    target_include_directories(vta_tsim SYSTEM PUBLIC ${VTA_HW_PATH}/include)
+    target_include_directories(vta_tsim SYSTEM PUBLIC ${VTA_HW_PATH}/include ${VERILATOR_INC_DIR} ${VERILATOR_INC_DIR}/vltstd)
     target_compile_definitions(vta_tsim PUBLIC DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
     foreach(__def ${VTA_DEFINITIONS})
       string(SUBSTRING ${__def} 3 -1 __strip_def)
@@ -94,8 +105,8 @@ elseif(PYTHON)
 
   # VTA FPGA driver sources
   if(USE_VTA_FPGA)
-    file(GLOB FSIM_RUNTIME_SRCS ${VTA_HW_PATH}/src/*.cc)
-    file(GLOB FPGA_RUNTIME_SRCS vta/runtime/*.cc)
+    tvm_file_glob(GLOB FSIM_RUNTIME_SRCS ${VTA_HW_PATH}/src/*.cc)
+    tvm_file_glob(GLOB FPGA_RUNTIME_SRCS vta/runtime/*.cc)
     # Rules for Zynq-class FPGAs with pynq OS support (see pynq.io)
     if(${VTA_TARGET} STREQUAL "pynq" OR
        ${VTA_TARGET} STREQUAL "ultra96")
@@ -103,7 +114,12 @@ elseif(PYTHON)
       # Rules for Pynq v2.4
       find_library(__cma_lib NAMES cma PATH /usr/lib)
     elseif(${VTA_TARGET} STREQUAL "de10nano")  # DE10-Nano rules
-      file(GLOB FPGA_RUNTIME_SRCS ${VTA_HW_PATH}/src/de10nano/*.cc ${VTA_HW_PATH}/src/*.cc)
+      tvm_file_glob(GLOB DE10_FPGA_RUNTIME_SRCS ${VTA_HW_PATH}/src/de10nano/*.cc ${VTA_HW_PATH}/src/*.cc)
+      list(APPEND FPGA_RUNTIME_SRCS ${DE10_FPGA_RUNTIME_SRCS})
+    elseif(${VTA_TARGET} STREQUAL "intelfocl")  # Intel OpenCL for FPGA rules
+      tvm_file_glob(GLOB FOCL_SRC ${VTA_HW_PATH}/src/oclfpga/*.cc)
+      list(APPEND FPGA_RUNTIME_SRCS ${FOCL_SRC})
+      list(APPEND FPGA_RUNTIME_SRCS ${VTA_HW_PATH}/src/vmem/virtual_memory.cc ${VTA_HW_PATH}/src/vmem/virtual_memory.h)
     endif()
     # Target lib: vta
     add_library(vta SHARED ${FPGA_RUNTIME_SRCS})
@@ -123,6 +139,10 @@ elseif(PYTHON)
       target_include_directories(vta SYSTEM PUBLIC 3rdparty)
       target_include_directories(vta SYSTEM PUBLIC
         "/usr/local/intelFPGA_lite/18.1/embedded/ds-5/sw/gcc/arm-linux-gnueabihf/include")
+    elseif(${VTA_TARGET} STREQUAL "intelfocl")  # Intel OpenCL for FPGA rules
+      target_include_directories(vta PUBLIC 3rdparty)
+      set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+      target_link_libraries(vta -lOpenCL)
     endif()
   endif()
 

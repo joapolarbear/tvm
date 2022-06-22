@@ -31,9 +31,13 @@
 #include <sys/wait.h>
 #endif  // __hexagon__
 #endif  // _WIN32
+
+#include <tvm/runtime/container/string.h>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -129,6 +133,22 @@ inline std::vector<std::string> Split(const std::string& str, char delim) {
 }
 
 /*!
+ * \brief Check whether the string starts with a given prefix.
+ * \param str The given string.
+ * \param prefix The given prefix.
+ * \return Whether the prefix matched.
+ */
+inline bool StartsWith(const String& str, const char* prefix) {
+  size_t n = str.length();
+  for (size_t i = 0; i < n; i++) {
+    if (prefix[i] == '\0') return true;
+    if (str.data()[i] != prefix[i]) return false;
+  }
+  // return true if the str is equal to the prefix
+  return prefix[n] == '\0';
+}
+
+/*!
  * \brief EndsWith check whether the strings ends with
  * \param value The full string
  * \param end The end substring
@@ -165,22 +185,44 @@ inline int Execute(std::string cmd, std::string* err_msg) {
 #endif  // __hexagon__
 
 /*!
- * \brief Combine two hash values into a single one.
+ * \brief hash an object and combines uint64_t key with previous keys
+ *
+ * This hash function is stable across platforms.
+ *
  * \param key The left operand.
  * \param value The right operand.
  * \return the combined result.
  */
-inline size_t HashCombine(size_t key, size_t value) {
-  return key ^ (value + 0x9e3779b9 + (key << 6) + (key >> 2));
+template <typename T, std::enable_if_t<std::is_convertible<T, uint64_t>::value, bool> = true>
+inline uint64_t HashCombine(uint64_t key, const T& value) {
+  // XXX: do not use std::hash in this function. This hash must be stable
+  // across different platforms and std::hash is implementation dependent.
+  return key ^ (uint64_t(value) + 0x9e3779b9 + (key << 6) + (key >> 2));
 }
 
 /*!
- * \brief hash an object and combines uint64_t key with previous keys
+ * \brief Return whether a boolean flag is set as an environment variable.
+ *
+ * Returns true if the environment variable is set to a non-zero
+ * integer, or to a non-empty string that is not an integer.
+ *
+ * Returns false if the environment variable is unset, if the
+ * environment variable is set to the integer zero, or if the
+ * environment variable is an empty string.
  */
-template <typename T>
-inline uint64_t HashCombine(uint64_t key, const T& value) {
-  std::hash<T> hash_func;
-  return key ^ (hash_func(value) + 0x9e3779b9 + (key << 6) + (key >> 2));
+inline bool BoolEnvironmentVar(const char* varname) {
+  const char* var = std::getenv(varname);
+  if (!var) {
+    return false;
+  }
+
+  int x = 0;
+  std::istringstream is(var);
+  if (is >> x) {
+    return x;
+  }
+
+  return *var;
 }
 
 }  // namespace support

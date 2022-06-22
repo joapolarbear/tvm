@@ -81,7 +81,8 @@ NDArray StorageObj::AllocNDArray(size_t offset, std::vector<int64_t> shape, DLDa
 
   // crtical zone: allocate header, cannot throw
   NDArray::Container* container =
-      new NDArray::Container(nullptr, shape, dtype, this->buffer.device);
+      new NDArray::Container(this->buffer.data, shape, dtype, this->buffer.device);
+  container->dl_tensor.byte_offset = offset;
 
   container->SetDeleter(StorageObj::Deleter);
   size_t needed_size = GetDataSize(container->dl_tensor);
@@ -93,12 +94,6 @@ NDArray StorageObj::AllocNDArray(size_t offset, std::vector<int64_t> shape, DLDa
   // reference count, then destroy the container, but leave the underlying
   // buffer intact.
   container->manager_ctx = reinterpret_cast<void*>(this);
-
-  // is this UB?
-  // The only change we make w.r.t offset is modifying the data pointer
-  // of the backing tensor to point into the buffer instead of its start.
-  auto offset_ptr = reinterpret_cast<uint8_t*>(this->buffer.data) + offset;
-  container->dl_tensor.data = reinterpret_cast<void*>(offset_ptr);
 
   NDArray ret(GetObjectPtr<Object>(container));
   // RAII in effect, now run the check.
@@ -124,14 +119,14 @@ Allocator* MemoryManager::GetOrCreateAllocator(Device dev, AllocatorType type) {
     std::unique_ptr<Allocator> alloc;
     switch (type) {
       case kNaive: {
-        DLOG(INFO) << "New naive allocator for " << DeviceName(dev.device_type) << "("
-                   << dev.device_id << ")";
+        VLOG(1) << "New naive allocator for " << DeviceName(dev.device_type) << "(" << dev.device_id
+                << ")";
         alloc.reset(new NaiveAllocator(dev));
         break;
       }
       case kPooled: {
-        DLOG(INFO) << "New pooled allocator for " << DeviceName(dev.device_type) << "("
-                   << dev.device_id << ")";
+        VLOG(1) << "New pooled allocator for " << DeviceName(dev.device_type) << "("
+                << dev.device_id << ")";
         alloc.reset(new PooledAllocator(dev));
         break;
       }

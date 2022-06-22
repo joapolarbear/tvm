@@ -18,9 +18,9 @@
 import collections
 import json
 import os
+
 import numpy as np
 import tvm
-
 
 GRAPH_DUMP_FILE_NAME = "_tvmdbg_graph_dump.json"
 CHROME_TRACE_FILE_NAME = "_tvmdbg_execution_trace.json"
@@ -112,33 +112,40 @@ class DebugResult(object):
         return self._dtype_list
 
     def get_output_tensors(self):
-        """Dump the outputs to a temporary folder, the tensors are in numpy format"""
+        """Get the output tensors of each operation in numpy format"""
         eid = 0
         order = 0
         output_tensors = {}
-        for node, time in zip(self._nodes_list, self._time_list):
+        for i, (node, time) in enumerate(zip(self._nodes_list, self._time_list)):
             num_outputs = self.get_graph_node_output_num(node)
             for j in range(num_outputs):
                 order += time[0]
-                key = node["name"] + "_" + str(j)
+
+                # the node name is not unique, so we need a consistent
+                # indexing based on the list ordering in the nodes
+                key = f"{node['name']}____topo-index:{i}____output-num:{j}"
                 output_tensors[key] = self._output_tensor_list[eid]
                 eid += 1
         return output_tensors
+
+    def update_output_tensors(self, tensors):
+        """Update output tensors list
+
+        Parameters
+        ----------
+        tensors : list[NDArray]
+        """
+        if not isinstance(tensors, list):
+            AttributeError("tensors with incorrect type.")
+
+        for output_array in tensors:
+            self._output_tensor_list.append(output_array)
 
     def dump_output_tensor(self):
         """Dump the outputs to a temporary folder, the tensors are in numpy format"""
         # cleanup existing tensors before dumping
         self._cleanup_tensors()
-        eid = 0
-        order = 0
-        output_tensors = {}
-        for node, time in zip(self._nodes_list, self._time_list):
-            num_outputs = self.get_graph_node_output_num(node)
-            for j in range(num_outputs):
-                order += time[0]
-                key = node["name"] + "_" + str(j) + "__" + str(order)
-                output_tensors[key] = self._output_tensor_list[eid]
-                eid += 1
+        output_tensors = self.get_output_tensors()
 
         with open(os.path.join(self._dump_path, "output_tensors.params"), "wb") as param_f:
             param_f.write(save_tensors(output_tensors))

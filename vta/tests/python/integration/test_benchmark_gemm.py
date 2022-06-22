@@ -60,7 +60,12 @@ def test_gemm():
         res = te.compute(res_shape, lambda *i: res_min(*i).astype(env.inp_dtype), name="res")
 
         def verify(s):
-            mod = vta.build(s, [data, weight, res], "ext_dev", env.target_host, name="gemm")
+            mod = vta.build(
+                s,
+                [data, weight, res],
+                tvm.target.Target("ext_dev", host=env.target_host),
+                name="gemm",
+            )
             temp = utils.tempdir()
             mod.save(temp.relpath("gemm.o"))
             remote.upload(temp.relpath("gemm.o"))
@@ -99,7 +104,7 @@ def test_gemm():
                 print("Execution statistics:")
                 for k, v in stats.items():
                     print("\t{:<16}: {:>16}".format(k, v))
-            res_unpack = res_arr.asnumpy().reshape(
+            res_unpack = res_arr.numpy().reshape(
                 batch_size // env.BATCH, channel // env.BLOCK_OUT, env.BATCH, env.BLOCK_OUT
             )
             return cost

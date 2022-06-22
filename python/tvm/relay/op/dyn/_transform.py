@@ -20,10 +20,13 @@ from __future__ import absolute_import
 
 from tvm.runtime import convert
 from tvm.te.hybrid import script
+
 from .. import op as _reg
 
 _reg.register_broadcast_schedule("dyn.broadcast_to")
 _reg.register_injective_schedule("dyn.reshape")
+_reg.register_injective_schedule("dyn.expand_dims")
+_reg.register_injective_schedule("dyn.squeeze")
 _reg.register_broadcast_schedule("dyn.tile")
 _reg.register_injective_schedule("dyn.one_hot")
 _reg.register_injective_schedule("dyn.full")
@@ -90,6 +93,42 @@ def dynamic_reshape_shape_func(attrs, inputs, out_ndims):
 
 
 @script
+def _expand_dims_shape_func_input_data(data, axis, ndims, num_newaxis):
+    out = output_tensor((ndims,), "int64")
+
+    for i in const_range(ndims):
+        if i < axis:
+            # We multiply by a check (i < len(data.shape)) to avoid
+            # a constant folding mechanism leading to an overflow
+            out[i] = int64(data.shape[i * (i < len(data.shape))])
+        elif i - num_newaxis < axis:
+            out[i] = int64(1)
+        else:
+            out[i] = int64(
+                # We can't use axis in indices as it is not constant but we can
+                # use negative indices (kind of, have to manually do it)
+                data.shape[
+                    (i - num_newaxis) * (i - num_newaxis >= 0)
+                    + (i - num_newaxis + len(data.shape)) * (i - num_newaxis < 0)
+                ]
+            )
+
+    return out
+
+
+@_reg.register_shape_func("dyn.expand_dims", [True, True])
+def dynamic_expand_dims_shape_func(attrs, inputs, out_ndims):
+    return [
+        _expand_dims_shape_func_input_data(
+            inputs[0],
+            inputs[1],
+            out_ndims[0],
+            convert(attrs.num_newaxis),
+        )
+    ]
+
+
+@script
 def _tile_shape_func(data, reps, ndim, tndim, rndim):
     out = output_tensor((tndim,), "int64")
 
@@ -151,40 +190,51 @@ def _strided_slice_shape_func_input_data(data_shape, begin, end, strides, slice_
     ndim = len(data_shape)
     out = output_tensor((ndim,), "int64")
     for i in const_range(ndim):
+        dim_size = int64(data_shape[i])
         cbegin = int64(0)
-        cend = int64(data_shape[i])
+        cend = dim_size
         cstride = int64(1)
+
         if strides.shape[0] > i:
             cstride = int64(strides[i])
+
         if begin.shape[0] > i:
             cbegin = int64(begin[i])
-            if cbegin < 0:
-                cbegin += int64(data_shape[i])
+        elif cstride < 0:
+            cbegin = dim_size
+
         if end.shape[0] <= i:
-            cend = int64(data_shape[i])
+            if cstride < 0:
+                cend = int64(0)
         elif slice_mode != 0:
             cstride = int64(1)
             if end[i] < 0:
-                cend = int64(data_shape[i])
+                cend = dim_size
             else:
                 cend = cbegin + int64(end[i])
         else:
             if end[i] > data_shape[i]:
-                cend = int64(data_shape[i])
-            elif end[i] < -data_shape[i]:
-                cend = int64(-1)
+                cend = dim_size
             else:
                 cend = int64(end[i])
-                if cend < 0:
-                    cend += int64(data_shape[i])
+
         assert cstride != 0, "Strides can't be zero."
+
+        if cbegin < 0:
+            cbegin += dim_size
+        if cend < 0:
+            cend += dim_size
+
         if cstride < 0:
+            if cend < 0:
+                cend = int64(-1)
+            if cbegin > dim_size - 1:
+                cbegin = dim_size - 1
             slice_range = cbegin - cend
             step = -cstride
         else:
             slice_range = cend - cbegin
             step = cstride
-
         out[i] = int64(ceil_div(slice_range, step))
     return out
 
@@ -209,3 +259,24 @@ def _sparse_to_dense_shape_func(output_shape, ndim):
 @_reg.register_shape_func("dyn.sparse_to_dense", True)
 def sparse_to_dense_shape_func(attrs, inputs, out_ndims):
     return [_sparse_to_dense_shape_func(inputs[3], out_ndims[0])]
+
+
+@script
+def _squeeze_shape_func_input_data(data, axis, ndims):
+    out = output_tensor((ndims,), "int64")
+    out_i = 0
+    for i in const_range(data.shape[0]):
+        not_in_axis = True
+        for j in const_range(axis.shape[0]):
+            if i == axis[j]:
+                not_in_axis = False
+        if not_in_axis:
+            out[out_i] = int64(data[i])
+            out_i += 1
+
+    return out
+
+
+@_reg.register_shape_func("dyn.squeeze", [False, True])
+def dynamic_squeeze_shape_func(attrs, inputs, out_ndims):
+    return [_squeeze_shape_func_input_data(inputs[0], inputs[1], out_ndims[0])]

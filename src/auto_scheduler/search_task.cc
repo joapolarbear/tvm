@@ -57,11 +57,11 @@ HardwareParams HardwareParamsNode::GetDefaultHardwareParams(const Target& target
   const auto device_type = target->kind->device_type;
   if (device_type == kDLCPU) {
     return HardwareParams(tvm::runtime::threading::MaxConcurrency(), 64, 64, 0, 0, 0, 0, 0);
-  } else if (device_type == kDLGPU || device_type == kDLROCM) {
+  } else if (device_type == kDLCUDA || device_type == kDLROCM) {
     auto dev = Device{static_cast<DLDeviceType>(device_type), 0};
-    auto device_name = device_type == kDLGPU ? "device_api.gpu" : "device_api.rocm";
+    auto device_name = device_type == kDLCUDA ? "device_api.cuda" : "device_api.rocm";
     auto func = tvm::runtime::Registry::Get(device_name);
-    ICHECK(func != nullptr) << "Cannot find GPU device_api in registry";
+    ICHECK(func != nullptr) << "Cannot find CUDA device_api in registry";
     auto device_api = static_cast<tvm::runtime::DeviceAPI*>(((*func)()).operator void*());
 
     tvm::runtime::TVMRetValue ret;
@@ -138,11 +138,13 @@ HardwareParams HardwareParamsNode::GetDefaultHardwareParams(const Target& target
 
 SearchTask::SearchTask(ComputeDAG compute_dag, String workload_key, Target target,
                        Target target_host, Optional<HardwareParams> hardware_params,
-                       LayoutRewriteOption layout_rewrite_option, Array<String> task_input_names) {
+                       LayoutRewriteOption layout_rewrite_option, Array<String> task_input_names,
+                       String desc) {
   CheckAndUpdateHostConsistency(&target, &target_host);
   auto node = make_object<SearchTaskNode>();
   node->compute_dag = std::move(compute_dag);
   node->workload_key = std::move(workload_key);
+  node->desc = std::move(desc);
   node->target = std::move(target);
   node->target_host = std::move(target_host);
   if (hardware_params) {
@@ -165,13 +167,18 @@ TVM_REGISTER_GLOBAL("auto_scheduler.HardwareParams")
                             max_threads_per_block, max_vthread_extent, warp_size);
     });
 
+TVM_REGISTER_GLOBAL("auto_scheduler.GetDefaultHardwareParams")
+    .set_body_typed([](Target target, Target target_host) {
+      return HardwareParamsNode::GetDefaultHardwareParams(target, target_host);
+    });
+
 TVM_REGISTER_GLOBAL("auto_scheduler.SearchTask")
     .set_body_typed([](ComputeDAG compute_dag, String workload_key, Target target,
                        Target target_host, Optional<HardwareParams> hardware_params,
-                       int layout_rewrite_option, Array<String> task_input_names) {
+                       int layout_rewrite_option, Array<String> task_input_names, String desc) {
       CheckAndUpdateHostConsistency(&target, &target_host);
       return SearchTask(compute_dag, workload_key, target, target_host, hardware_params,
-                        LayoutRewriteOption(layout_rewrite_option), task_input_names);
+                        LayoutRewriteOption(layout_rewrite_option), task_input_names, desc);
     });
 
 }  // namespace auto_scheduler

@@ -103,26 +103,35 @@ class CUDADeviceAPI final : public DeviceAPI {
         *rv = CUDA_VERSION;
         return;
       }
+      case kDriverVersion:
+        return;
     }
     *rv = value;
   }
   void* AllocDataSpace(Device dev, size_t nbytes, size_t alignment, DLDataType type_hint) final {
     ICHECK_EQ(256 % alignment, 0U) << "CUDA space is aligned at 256 bytes";
     void* ret;
-    if (dev.device_type == kDLCPUPinned) {
+    if (dev.device_type == kDLCUDAHost) {
+      VLOG(1) << "allocating " << nbytes << "bytes on host";
       CUDA_CALL(cudaMallocHost(&ret, nbytes));
     } else {
       CUDA_CALL(cudaSetDevice(dev.device_id));
+      size_t free_mem, total_mem;
+      CUDA_CALL(cudaMemGetInfo(&free_mem, &total_mem));
+      VLOG(1) << "allocating " << nbytes << " bytes on device, with " << free_mem
+              << " bytes currently free out of " << total_mem << " bytes available";
       CUDA_CALL(cudaMalloc(&ret, nbytes));
     }
     return ret;
   }
 
   void FreeDataSpace(Device dev, void* ptr) final {
-    if (dev.device_type == kDLCPUPinned) {
+    if (dev.device_type == kDLCUDAHost) {
+      VLOG(1) << "freeing host memory";
       CUDA_CALL(cudaFreeHost(ptr));
     } else {
       CUDA_CALL(cudaSetDevice(dev.device_id));
+      VLOG(1) << "freeing device memory";
       CUDA_CALL(cudaFree(ptr));
     }
   }
@@ -135,11 +144,11 @@ class CUDADeviceAPI final : public DeviceAPI {
     from = static_cast<const char*>(from) + from_offset;
     to = static_cast<char*>(to) + to_offset;
 
-    if (dev_from.device_type == kDLCPUPinned) {
+    if (dev_from.device_type == kDLCUDAHost) {
       dev_from.device_type = kDLCPU;
     }
 
-    if (dev_to.device_type == kDLCPUPinned) {
+    if (dev_to.device_type == kDLCUDAHost) {
       dev_to.device_type = kDLCPU;
     }
 
@@ -149,17 +158,17 @@ class CUDADeviceAPI final : public DeviceAPI {
       return;
     }
 
-    if (dev_from.device_type == kDLGPU && dev_to.device_type == kDLGPU) {
+    if (dev_from.device_type == kDLCUDA && dev_to.device_type == kDLCUDA) {
       CUDA_CALL(cudaSetDevice(dev_from.device_id));
       if (dev_from.device_id == dev_to.device_id) {
         GPUCopy(from, to, size, cudaMemcpyDeviceToDevice, cu_stream);
       } else {
         cudaMemcpyPeerAsync(to, dev_to.device_id, from, dev_from.device_id, size, cu_stream);
       }
-    } else if (dev_from.device_type == kDLGPU && dev_to.device_type == kDLCPU) {
+    } else if (dev_from.device_type == kDLCUDA && dev_to.device_type == kDLCPU) {
       CUDA_CALL(cudaSetDevice(dev_from.device_id));
       GPUCopy(from, to, size, cudaMemcpyDeviceToHost, cu_stream);
-    } else if (dev_from.device_type == kDLCPU && dev_to.device_type == kDLGPU) {
+    } else if (dev_from.device_type == kDLCPU && dev_to.device_type == kDLCUDA) {
       CUDA_CALL(cudaSetDevice(dev_to.device_id));
       GPUCopy(from, to, size, cudaMemcpyHostToDevice, cu_stream);
     } else {
@@ -229,16 +238,16 @@ class CUDADeviceAPI final : public DeviceAPI {
 
 typedef dmlc::ThreadLocalStore<CUDAThreadEntry> CUDAThreadStore;
 
-CUDAThreadEntry::CUDAThreadEntry() : pool(kDLGPU, CUDADeviceAPI::Global()) {}
+CUDAThreadEntry::CUDAThreadEntry() : pool(kDLCUDA, CUDADeviceAPI::Global()) {}
 
 CUDAThreadEntry* CUDAThreadEntry::ThreadLocal() { return CUDAThreadStore::Get(); }
 
-TVM_REGISTER_GLOBAL("device_api.gpu").set_body([](TVMArgs args, TVMRetValue* rv) {
+TVM_REGISTER_GLOBAL("device_api.cuda").set_body([](TVMArgs args, TVMRetValue* rv) {
   DeviceAPI* ptr = CUDADeviceAPI::Global();
   *rv = static_cast<void*>(ptr);
 });
 
-TVM_REGISTER_GLOBAL("device_api.cpu_pinned").set_body([](TVMArgs args, TVMRetValue* rv) {
+TVM_REGISTER_GLOBAL("device_api.cuda_host").set_body([](TVMArgs args, TVMRetValue* rv) {
   DeviceAPI* ptr = CUDADeviceAPI::Global();
   *rv = static_cast<void*>(ptr);
 });
@@ -277,6 +286,17 @@ TVM_REGISTER_OBJECT_TYPE(GPUTimerNode);
 TVM_REGISTER_GLOBAL("profiling.timer.gpu").set_body_typed([](Device dev) {
   return Timer(make_object<GPUTimerNode>());
 });
+
+TVM_DLL String GetCudaFreeMemory() {
+  size_t free_mem, total_mem;
+  CUDA_CALL(cudaMemGetInfo(&free_mem, &total_mem));
+  std::stringstream ss;
+  ss << "Current CUDA memory is " << free_mem << " bytes free out of " << total_mem
+     << " bytes on device";
+  return ss.str();
+}
+
+TVM_REGISTER_GLOBAL("runtime.GetCudaFreeMemory").set_body_typed(GetCudaFreeMemory);
 
 }  // namespace runtime
 }  // namespace tvm

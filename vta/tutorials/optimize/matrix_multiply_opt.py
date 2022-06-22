@@ -310,7 +310,9 @@ print(vta.lower(s, [data, weight, res], simple_mode=True))
 # ensure correctness.
 
 # Compile the TVM module
-my_gemm = vta.build(s, [data, weight, res], "ext_dev", env.target_host, name="my_gemm")
+my_gemm = vta.build(
+    s, [data, weight, res], tvm.target.Target("ext_dev", host=env.target_host), name="my_gemm"
+)
 temp = utils.tempdir()
 my_gemm.save(temp.relpath("gemm.o"))
 remote.upload(temp.relpath("gemm.o"))
@@ -351,7 +353,7 @@ res_ref = res_ref.astype(res.dtype)
 res_ref = res_ref.reshape(
     batch_size // env.BATCH, env.BATCH, out_channels // env.BLOCK_OUT, env.BLOCK_OUT
 ).transpose((0, 2, 1, 3))
-np.testing.assert_equal(res_ref, res_nd.asnumpy())
+np.testing.assert_equal(res_ref, res_nd.numpy())
 
 # Print stats
 if env.TARGET in ["sim", "tsim"]:

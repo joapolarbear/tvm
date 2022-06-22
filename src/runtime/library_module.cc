@@ -37,7 +37,8 @@ namespace runtime {
 // Library module that exposes symbols from a library.
 class LibraryModuleNode final : public ModuleNode {
  public:
-  explicit LibraryModuleNode(ObjectPtr<Library> lib) : lib_(lib) {}
+  explicit LibraryModuleNode(ObjectPtr<Library> lib, PackedFuncWrapper wrapper)
+      : lib_(lib), packed_func_wrapper_(wrapper) {}
 
   const char* type_key() const final { return "library"; }
 
@@ -53,11 +54,12 @@ class LibraryModuleNode final : public ModuleNode {
       faddr = reinterpret_cast<TVMBackendPackedCFunc>(lib_->GetSymbol(name.c_str()));
     }
     if (faddr == nullptr) return PackedFunc();
-    return WrapPackedFunc(faddr, sptr_to_self);
+    return packed_func_wrapper_(faddr, sptr_to_self);
   }
 
  private:
   ObjectPtr<Library> lib_;
+  PackedFuncWrapper packed_func_wrapper_;
 };
 
 /*!
@@ -125,10 +127,12 @@ Module LoadModuleFromBinary(const std::string& type_key, dmlc::Stream* stream) {
  * \brief Load and append module blob to module list
  * \param mblob The module blob.
  * \param lib The library.
- *
- * \return Root Module.
+ * \param root_module the output root module
+ * \param dso_ctx_addr the output dso module
  */
-runtime::Module ProcessModuleBlob(const char* mblob, ObjectPtr<Library> lib) {
+void ProcessModuleBlob(const char* mblob, ObjectPtr<Library> lib,
+                       PackedFuncWrapper packed_func_wrapper, runtime::Module* root_module,
+                       runtime::ModuleNode** dso_ctx_addr = nullptr) {
   ICHECK(mblob != nullptr);
   uint64_t nbytes = 0;
   for (size_t i = 0; i < sizeof(nbytes); ++i) {
@@ -143,14 +147,20 @@ runtime::Module ProcessModuleBlob(const char* mblob, ObjectPtr<Library> lib) {
   std::vector<Module> modules;
   std::vector<uint64_t> import_tree_row_ptr;
   std::vector<uint64_t> import_tree_child_indices;
+  int num_dso_module = 0;
+
   for (uint64_t i = 0; i < size; ++i) {
     std::string tkey;
     ICHECK(stream->Read(&tkey));
-    // Currently, _lib is for DSOModule, but we
-    // don't have loadbinary function for it currently
+    // "_lib" serves as a placeholder in the module import tree to indicate where
+    // to place the DSOModule
     if (tkey == "_lib") {
-      auto dso_module = Module(make_object<LibraryModuleNode>(lib));
+      auto dso_module = Module(make_object<LibraryModuleNode>(lib, packed_func_wrapper));
+      *dso_ctx_addr = dso_module.operator->();
+      ++num_dso_module;
       modules.emplace_back(dso_module);
+      ICHECK_EQ(num_dso_module, 1U) << "Multiple dso module detected, please upgrade tvm "
+                                    << " to the latest before exporting the module";
     } else if (tkey == "_import_tree") {
       ICHECK(stream->Read(&import_tree_row_ptr));
       ICHECK(stream->Read(&import_tree_child_indices));
@@ -159,15 +169,17 @@ runtime::Module ProcessModuleBlob(const char* mblob, ObjectPtr<Library> lib) {
       modules.emplace_back(m);
     }
   }
+
   // if we are using old dll, we don't have import tree
   // so that we can't reconstruct module relationship using import tree
   if (import_tree_row_ptr.empty()) {
-    auto n = make_object<LibraryModuleNode>(lib);
+    auto n = make_object<LibraryModuleNode>(lib, packed_func_wrapper);
     auto module_import_addr = ModuleInternal::GetImportsAddr(n.operator->());
     for (const auto& m : modules) {
       module_import_addr->emplace_back(m);
     }
-    return Module(n);
+    *dso_ctx_addr = n.get();
+    *root_module = Module(n);
   } else {
     for (size_t i = 0; i < modules.size(); ++i) {
       for (size_t j = import_tree_row_ptr[i]; j < import_tree_row_ptr[i + 1]; ++j) {
@@ -177,33 +189,42 @@ runtime::Module ProcessModuleBlob(const char* mblob, ObjectPtr<Library> lib) {
         module_import_addr->emplace_back(modules[child_index]);
       }
     }
+
+    ICHECK(!modules.empty()) << "modules cannot be empty when import tree is present";
+    // invariance: root module is always at location 0.
+    // The module order is collected via DFS
+    *root_module = modules[0];
   }
-  ICHECK(!modules.empty());
-  // invariance: root module is always at location 0.
-  // The module order is collected via DFS
-  return modules[0];
 }
 
-Module CreateModuleFromLibrary(ObjectPtr<Library> lib) {
+Module CreateModuleFromLibrary(ObjectPtr<Library> lib, PackedFuncWrapper packed_func_wrapper) {
   InitContextFunctions([lib](const char* fname) { return lib->GetSymbol(fname); });
-  auto n = make_object<LibraryModuleNode>(lib);
+  auto n = make_object<LibraryModuleNode>(lib, packed_func_wrapper);
   // Load the imported modules
   const char* dev_mblob =
       reinterpret_cast<const char*>(lib->GetSymbol(runtime::symbol::tvm_dev_mblob));
+
   Module root_mod;
+  runtime::ModuleNode* dso_ctx_addr = nullptr;
   if (dev_mblob != nullptr) {
-    root_mod = ProcessModuleBlob(dev_mblob, lib);
+    ProcessModuleBlob(dev_mblob, lib, packed_func_wrapper, &root_mod, &dso_ctx_addr);
   } else {
     // Only have one single DSO Module
     root_mod = Module(n);
+    dso_ctx_addr = root_mod.operator->();
   }
 
   // allow lookup of symbol from root (so all symbols are visible).
   if (auto* ctx_addr = reinterpret_cast<void**>(lib->GetSymbol(runtime::symbol::tvm_module_ctx))) {
-    *ctx_addr = root_mod.operator->();
+    *ctx_addr = dso_ctx_addr;
   }
 
   return root_mod;
 }
+
+TVM_REGISTER_GLOBAL("runtime.module.loadfile_so").set_body([](TVMArgs args, TVMRetValue* rv) {
+  ObjectPtr<Library> n = CreateDSOLibraryObject(args[0]);
+  *rv = CreateModuleFromLibrary(n);
+});
 }  // namespace runtime
 }  // namespace tvm

@@ -28,9 +28,9 @@ TASK = "conv2d_hwcn_map"
 USE_MANUAL_CODE = False
 
 
-@tvm.register_func
+@tvm.register_func("tvm_callback_cuda_compile", override=True)
 def tvm_callback_cuda_compile(code):
-    ptx = nvcc.compile_cuda(code, target="ptx")
+    ptx = nvcc.compile_cuda(code, target_format="ptx")
     return ptx
 
 
@@ -88,10 +88,10 @@ def test_conv2d_hwcn_map():
         ):
             func1 = tvm.build(s1, [A, W, B], device)
             func1(a, w, b)
-            tvm.testing.assert_allclose(b.asnumpy(), b_np, rtol=1e-5)
+            tvm.testing.assert_allclose(b.numpy(), b_np, rtol=1e-5)
             func2 = tvm.build(s2, [A, W, C], device)
             func2(a, w, c)
-            tvm.testing.assert_allclose(c.asnumpy(), c_np, rtol=1e-5)
+            tvm.testing.assert_allclose(c.numpy(), c_np, rtol=1e-5)
 
     for device in ["cuda", "opencl", "rocm"]:
         check_device(device)

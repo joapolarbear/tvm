@@ -30,10 +30,10 @@ SKIP_CHECK = False
 UNROLL_WLOAD = True
 
 
-@tvm.register_func
+@tvm.register_func("tvm_callback_cuda_compile", override=True)
 def tvm_callback_cuda_compile(code):
     """Use nvcc compiler for better perf."""
-    ptx = nvcc.compile_cuda(code, target="ptx")
+    ptx = nvcc.compile_cuda(code, target_format="ptx")
     return ptx
 
 
@@ -171,7 +171,7 @@ def lstm():
     def check_device(target):
         num_step = n_num_step
         flstm = tvm.build(s, [Xi2h, Wh2h, scan_h, scan_c], target)
-        dev = tvm.gpu(0) if target == "cuda" else tvm.cl(0)
+        dev = tvm.cuda(0) if target == "cuda" else tvm.cl(0)
         # launch the kernel.
         scan_h_np = np.zeros((num_step, batch_size, num_hidden)).astype("float32")
         scan_c_np = np.zeros((num_step, batch_size, num_hidden)).astype("float32")

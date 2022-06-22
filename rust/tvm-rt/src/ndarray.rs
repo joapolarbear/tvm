@@ -61,7 +61,7 @@ use num_traits::Num;
 
 use crate::errors::NDArrayError;
 
-use crate::object::{Object, ObjectPtr};
+use crate::object::{Object, ObjectPtr, ObjectRef};
 
 /// See the [`module-level documentation`](../ndarray/index.html) for more details.
 #[repr(C)]
@@ -73,7 +73,7 @@ pub struct NDArrayContainer {
     // Container Base
     dl_tensor: DLTensor,
     manager_ctx: *mut c_void,
-    // TOOD: shape?
+    shape: ObjectRef,
 }
 
 impl NDArrayContainer {
@@ -94,6 +94,21 @@ impl NDArrayContainer {
         let base_offset = memoffset::offset_of!(NDArrayContainer, dl_tensor) as isize;
         unsafe {
             &mut *std::mem::ManuallyDrop::new(object_ptr)
+                .ptr
+                .as_ptr()
+                .cast::<u8>()
+                .offset(base_offset)
+                .cast::<NDArrayContainer>()
+        }
+    }
+
+    pub fn as_mut_ptr<'a>(object_ptr: &ObjectPtr<NDArrayContainer>) -> *mut NDArrayContainer
+    where
+        NDArrayContainer: 'a,
+    {
+        let base_offset = memoffset::offset_of!(NDArrayContainer, dl_tensor) as isize;
+        unsafe {
+            object_ptr
                 .ptr
                 .as_ptr()
                 .cast::<u8>()
@@ -287,7 +302,7 @@ impl NDArray {
         check_call!(ffi::TVMArrayCopyFromBytes(
             self.as_raw_dltensor(),
             data.as_ptr() as *mut _,
-            data.len() * mem::size_of::<T>()
+            (data.len() * mem::size_of::<T>()) as _,
         ));
     }
 
@@ -296,7 +311,7 @@ impl NDArray {
         check_call!(ffi::TVMArrayCopyToBytes(
             self.as_raw_dltensor(),
             data.as_ptr() as *mut _,
-            self.size(),
+            self.size() as _,
         ));
     }
 

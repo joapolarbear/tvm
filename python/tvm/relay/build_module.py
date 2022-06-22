@@ -34,12 +34,29 @@ from . import ty as _ty
 from . import expr as _expr
 from . import function as _function
 from .transform import InferType
-from .backend import graph_executor_factory as _graph_executor_factory
+from .backend.utils import mangle_module_name
+from .backend import executor_factory as _executor_factory, Executor, Runtime
 from .backend import interpreter as _interpreter
 from .backend.vm import VMExecutor
 
 
-def _update_target(target):
+def build_target_by_device_type_map(target):
+    """Build a map from DLDevice device_type to a Target used with that device.
+
+    At runtime, TVM assigns target code to DLDevices by determining a device_type for each Target.
+    This function handles this process at compile time and, as a side effect, validates that exactly
+    one target maps to one device_type.
+
+    Parameters
+    ----------
+    target : Target or str or dict
+       If a Target or str: assumes that exactly one device type is present in the model.
+       If a dict: keys are tvm.ndarray.device, values are the targets used for each device.
+
+    Returns
+    -------
+
+    """
     target = target if target else Target.current()
     if target is None:
         raise ValueError("Target is not set in env or passed as argument.")
@@ -83,8 +100,20 @@ class BuildModule(object):
         self._optimize = self.mod["optimize"]
         self._set_params_func = self.mod["set_params"]
         self._get_params_func = self.mod["get_params"]
+        self._get_function_metadata = self.mod["get_function_metadata"]
+        self._get_devices = self.mod["get_devices"]
+        self._get_irmodule = self.mod["get_irmodule"]
 
-    def build(self, mod, target=None, target_host=None, params=None):
+    def build(
+        self,
+        mod,
+        target=None,
+        target_host=None,
+        executor=Executor("graph"),
+        runtime=Runtime("cpp"),
+        params=None,
+        mod_name=None,
+    ):
         """
         Parameters
         ----------
@@ -103,18 +132,40 @@ class BuildModule(object):
             to setup the dimensions and parameters correctly.
             target_host is used to specify the host side codegen target.
             By default, llvm is used if it is enabled,
-            otherwise a stackvm intepreter is used.
+            otherwise a stackvm interpreter is used.
+
+        executor : Optional[Executor]
+            The executor configuration with which to build the model.
+            Defaults to "graph" if no executor specified.
+
+        runtime : Optional[Runtime]
+            Runtime configuration to use when building the model.
+            Defaults to "cpp" if no runtime specified.
 
         params : dict of str to NDArray
             Input parameters to the graph that do not change
             during inference time. Used for constant folding.
 
+        mod_name: Optional[str]
+            The module name we will build
+
         Returns
         -------
-        factory_module : tvm.relay.backend.graph_executor_factory.GraphExecutorFactoryModule
-            The runtime factory for the TVM graph executor.
+        graph_json : str
+            The json string that can be accepted by graph executor.
+
+        mod : tvm.Module
+            The module containing necessary libraries.
+
+        params : dict
+            The parameters of the final graph.
         """
-        target = _update_target(target)
+        if target_host is not None:
+            warnings.warn(
+                "target_host parameter is going to be deprecated. "
+                "Please pass in tvm.target.Target(target, host=target_host) instead."
+            )
+        target = build_target_by_device_type_map(target)
         target, target_host = Target.check_and_update_host_consist(
             target, target_host, target_is_dict_key=False
         )
@@ -133,15 +184,17 @@ class BuildModule(object):
         old_autotvm_silent = autotvm.GLOBAL_SCOPE.silent
         autotvm.GLOBAL_SCOPE.silent = use_auto_scheduler
 
-        self._build(mod, target, target_host)
+        mod_name = mangle_module_name(mod_name)
+
+        self._build(mod, target, target_host, executor, runtime, mod_name)
         autotvm.GLOBAL_SCOPE.silent = old_autotvm_silent
 
         # Get artifacts
-        graph_json = self.get_json()
         mod = self.get_module()
         params = self.get_params()
+        executor_config = self.get_graph_json() if str(executor) == "graph" else None
 
-        return graph_json, mod, params
+        return executor_config, mod, params
 
     def optimize(self, mod, target=None, params=None):
         """
@@ -167,7 +220,7 @@ class BuildModule(object):
         params : dict
             The parameters of the final graph.
         """
-        target = _update_target(target)
+        target = build_target_by_device_type_map(target)
 
         # Setup the params.
         if params:
@@ -181,13 +234,23 @@ class BuildModule(object):
     def _set_params(self, params):
         self._set_params_func(_convert_param_map(params))
 
-    def get_json(self):
+    def get_graph_json(self):
         """Return the json file of the built program."""
         return self._get_graph_json()
 
     def get_module(self):
         """Return the built module."""
         return self._get_module()
+
+    def get_function_metadata(self):
+        """Return the compiled function metadata.
+        Currently, the metadata contains workspace size required by
+        each PrimFunc"""
+        return self._get_function_metadata()
+
+    def get_devices(self):
+        """Returns a list of devices configured in this module"""
+        return self._get_devices()
 
     def get_params(self):
         """Return the updated weights."""
@@ -196,6 +259,10 @@ class BuildModule(object):
         for key, value in params.items():
             ret[key] = value.data
         return ret
+
+    def get_irmodule(self):
+        """Returns the Target IRModule's post-lowering"""
+        return self._get_irmodule()
 
 
 @register_func("tvm.relay.module_export_library")
@@ -213,7 +280,78 @@ def _build_module_no_factory(mod, target=None, target_host=None, params=None, mo
     return build(mod, target, params=params, mod_name=mod_name).module
 
 
-def build(ir_mod, target=None, target_host=None, params=None, mod_name="default"):
+def _reconstruct_from_deprecated_options(deprecated_params_target):
+    executor = None
+    runtime = None
+
+    deprecated_executor = None
+    deprecated_executor_args = {}
+    if "executor" in deprecated_params_target.attrs:
+        _deprecated_target_param_warning("Executor", "executor")
+        deprecated_executor = deprecated_params_target.attrs.get("executor", "graph")
+    if "interface-api" in deprecated_params_target.attrs:
+        _deprecated_target_sub_param_warning("Executor", "interface-api")
+        deprecated_executor_args.update(
+            {"interface-api": deprecated_params_target.attrs["interface-api"]}
+        )
+    if "unpacked-api" in deprecated_params_target.attrs:
+        _deprecated_target_sub_param_warning("Executor", "unpacked-api")
+        deprecated_executor_args.update(
+            {"unpacked-api": deprecated_params_target.attrs["unpacked-api"]}
+        )
+    if (
+        "link-params" in deprecated_params_target.attrs
+        and deprecated_params_target.attrs["link-params"]
+    ):
+        _deprecated_target_sub_param_warning("Executor", "link-params")
+        if deprecated_executor != "aot":
+            deprecated_executor_args.update(
+                {"link-params": deprecated_params_target.attrs["link-params"]}
+            )
+    if deprecated_executor or deprecated_executor_args:
+        executor = Executor(deprecated_executor or "graph", deprecated_executor_args)
+
+    deprecated_runtime = None
+    deprecated_runtime_args = {}
+    if "runtime" in deprecated_params_target.attrs:
+        _deprecated_target_param_warning("Runtime", "runtime")
+        deprecated_runtime = deprecated_params_target.attrs.get("runtime", "cpp")
+        if deprecated_runtime == "c":
+            deprecated_runtime = "crt"
+    if "system-lib" in deprecated_params_target.attrs:
+        _deprecated_target_sub_param_warning("Runtime", "system-lib")
+        deprecated_runtime_args.update({"system-lib": deprecated_params_target.attrs["system-lib"]})
+    if deprecated_runtime or deprecated_runtime_args:
+        runtime = Runtime(deprecated_runtime or "cpp", deprecated_runtime_args)
+
+    return executor, runtime
+
+
+def _deprecated_target_param_warning(registry, param):
+    warnings.warn(
+        f"Please use {registry} (tvm.relay.backend.{registry}) "
+        f"instead of deprecated Target parameter -{param}",
+        DeprecationWarning,
+    )
+
+
+def _deprecated_target_sub_param_warning(registry, param):
+    warnings.warn(
+        f"Please use {registry} (tvm.relay.backend.{registry}) parameter {param} "
+        f"instead of deprecated Target parameter -{param}",
+        DeprecationWarning,
+    )
+
+
+def build(
+    ir_mod,
+    target=None,
+    target_host=None,
+    executor=Executor("graph"),
+    runtime=Runtime("cpp"),
+    params=None,
+    mod_name="default",
+):
     # fmt: off
     # pylint: disable=line-too-long
     """Helper function that builds a Relay function to run on TVM graph executor.
@@ -234,7 +372,15 @@ def build(ir_mod, target=None, target_host=None, params=None, mod_name="default"
         setup the dimensions and parameters correctly.
         target_host is used to specify the host side codegen target.
         By default, llvm is used if it is enabled,
-        otherwise a stackvm intepreter is used.
+        otherwise a stackvm interpreter is used.
+
+    executor : Optional[Executor]
+        The executor configuration with which to build the model.
+        Defaults to "graph" if no executor specified.
+
+    runtime : Optional[Runtime]
+        Runtime configuration to use when building the model.
+        Defaults to "cpp" if no runtime specified.
 
     params : dict of str to NDArray
         Input parameters to the graph that do not change
@@ -245,17 +391,12 @@ def build(ir_mod, target=None, target_host=None, params=None, mod_name="default"
 
     Returns
     -------
-    graph_json : str
-        The json string that can be accepted by graph executor.
-
-    mod : tvm.Module
-        The module containing necessary libraries.
-
-    params : dict
-        The parameters of the final graph.
+    factory_module : tvm.relay.backend.executor_factory.ExecutorFactoryModule
+            The runtime factory for the TVM graph executor.
     """
     # pylint: enable=line-too-long
     # fmt: on
+
     if not isinstance(ir_mod, (IRModule, _function.Function)):
         raise ValueError("Type of input parameter mod must be tvm.IRModule")
 
@@ -268,15 +409,33 @@ def build(ir_mod, target=None, target_host=None, params=None, mod_name="default"
             "instead of deprecated parameter mod (tvm.relay.function.Function)",
             DeprecationWarning,
         )
-    target = _update_target(target)
+
+    if target_host is not None:
+        warnings.warn(
+            "target_host parameter is going to be deprecated. "
+            "Please pass in tvm.target.Target(target, host=target_host) instead."
+        )
+
+    target, target_host = Target.check_and_update_host_consist(
+        target, target_host, target_is_dict_key=False
+    )
+
+    target = build_target_by_device_type_map(target)
     if isinstance(target_host, (str, Target)):
         target_host = Target(target_host)
     elif target_host:
         raise ValueError("target host must be the type of str, " + "tvm.target.Target, or None")
 
-    target, target_host = Target.check_and_update_host_consist(
-        target, target_host, target_is_dict_key=False
+    # All of this logic is to raise deprecation warnings for various parameters
+    # TODO(Mousius) Remove these after some time
+    deprecated_params_target = target_host or list(target.values())[0]
+    deprecated_executor, deprecated_runtime = _reconstruct_from_deprecated_options(
+        deprecated_params_target
     )
+    if deprecated_executor:
+        executor = deprecated_executor
+    if deprecated_runtime:
+        runtime = deprecated_runtime
 
     # If current dispatch context is fallback context (the default root context),
     # then load pre-tuned parameters from TopHub
@@ -287,10 +446,37 @@ def build(ir_mod, target=None, target_host=None, params=None, mod_name="default"
 
     with tophub_context:
         bld_mod = BuildModule()
-        graph_json, runtime_mod, params = bld_mod.build(mod=ir_mod, target=target, params=params)
-        executor_factory = _graph_executor_factory.GraphExecutorFactoryModule(
-            ir_mod, target, graph_json, runtime_mod, mod_name, params
+        graph_json, runtime_mod, params = bld_mod.build(
+            mod=ir_mod,
+            target=target,
+            params=params,
+            executor=executor,
+            runtime=runtime,
+            mod_name=mod_name,
         )
+        func_metadata = bld_mod.get_function_metadata()
+        devices = bld_mod.get_devices()
+        lowered_ir_mods = bld_mod.get_irmodule()
+
+        if str(executor) == "aot":
+            executor_factory = _executor_factory.AOTExecutorFactoryModule(
+                ir_mod,
+                lowered_ir_mods,
+                target,
+                executor,
+                runtime_mod,
+                mod_name,
+                params,
+                func_metadata,
+                devices,
+            )
+        elif str(executor) == "graph":
+            executor_factory = _executor_factory.GraphExecutorFactoryModule(
+                ir_mod, target, executor, graph_json, runtime_mod, mod_name, params, func_metadata
+            )
+        else:
+            assert False, "Executor " + executor + " not supported"
+
         return executor_factory
 
 
@@ -332,7 +518,7 @@ def optimize(mod, target=None, params=None):
             DeprecationWarning,
         )
 
-    target = _update_target(target)
+    target = build_target_by_device_type_map(target)
 
     # If current dispatch context is fallback context (the default root context),
     # then load pre-tuned parameters from TopHub
@@ -373,7 +559,7 @@ def bind_params_by_name(func, params):
 class GraphExecutor(_interpreter.Executor):
     """Wrapper around Executor interface.
 
-    This executor is used for debug and testing purpoes.
+    This executor is used for debug and testing purposes.
 
     Parameters
     ----------
@@ -432,7 +618,10 @@ class GraphExecutor(_interpreter.Executor):
         return _graph_wrapper
 
 
-def create_executor(kind="debug", mod=None, device=None, target="llvm"):
+# TODO(mbs): Collapse the create_executor/evaluate phases together since a) most callers don't
+# reuse the executor for multiple expressions and b) any preparation necessary for the expression
+# evaluation needs to (currently) be done along with preparation for the module.
+def create_executor(kind="debug", mod=None, device=None, target="llvm", params=None):
     """Factory function to create an executor.
 
     Example
@@ -465,6 +654,10 @@ def create_executor(kind="debug", mod=None, device=None, target="llvm"):
     target : :py:class:`tvm.Target`
         The corresponding context
 
+    params : dict of str to NDArray
+         Input parameters to the graph that do not change
+         during inference time.
+
     Returns
     -------
     executor : :py:class:`~tvm.relay.backend.interpreter.Executor`
@@ -475,6 +668,9 @@ def create_executor(kind="debug", mod=None, device=None, target="llvm"):
         assert device.device_type == _nd.device(str(target), 0).device_type
     else:
         device = _nd.device(str(target), 0)
+
+    if params is not None:
+        mod = IRModule.from_expr(bind_params_by_name(mod["main"], params))
 
     if isinstance(target, str):
         target = Target(target)

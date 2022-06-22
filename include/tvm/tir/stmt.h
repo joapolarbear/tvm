@@ -324,6 +324,7 @@ class BufferStore : public Stmt {
                                Span span = Span());
 
   TVM_DEFINE_OBJECT_REF_METHODS(BufferStore, Stmt, BufferStoreNode);
+  TVM_DEFINE_OBJECT_REF_COW_METHOD(BufferStoreNode);
 };
 
 /*!
@@ -463,18 +464,22 @@ class ProducerRealizeNode : public StmtNode {
   PrimExpr condition;
   /*! \brief The body of realization. */
   Stmt body;
+  /*! \brief The storage scope associated with this realization. */
+  String storage_scope;
 
   void VisitAttrs(AttrVisitor* v) {
     v->Visit("producer", &producer);
     v->Visit("bounds", &bounds);
     v->Visit("condition", &condition);
     v->Visit("body", &body);
+    v->Visit("storage_scope", &storage_scope);
     v->Visit("span", &span);
   }
 
   bool SEqualReduce(const ProducerRealizeNode* other, SEqualReducer equal) const {
     return equal(producer, other->producer) && equal(bounds, other->bounds) &&
-           equal(condition, other->condition) && equal(body, other->body);
+           equal(condition, other->condition) && equal(body, other->body) &&
+           equal(storage_scope, other->storage_scope);
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -482,6 +487,7 @@ class ProducerRealizeNode : public StmtNode {
     hash_reduce(bounds);
     hash_reduce(condition);
     hash_reduce(body);
+    hash_reduce(storage_scope);
   }
 
   static constexpr const char* _type_key = "tir.ProducerRealize";
@@ -495,7 +501,7 @@ class ProducerRealizeNode : public StmtNode {
 class ProducerRealize : public Stmt {
  public:
   TVM_DLL ProducerRealize(DataProducer producer, Region bounds, PrimExpr condition, Stmt body,
-                          Span span = Span());
+                          String storage_scope = "", Span span = Span());
 
   TVM_DEFINE_OBJECT_REF_METHODS(ProducerRealize, Stmt, ProducerRealizeNode);
 };
@@ -515,6 +521,13 @@ class AllocateNode : public StmtNode {
   PrimExpr condition;
   /*! \brief The body to be executed. */
   Stmt body;
+  /*!
+   * \brief Additional annotations about the allocation.
+   *
+   *  These annotations can be used as auxiliary hint
+   *  to future transformations.
+   */
+  Map<String, ObjectRef> annotations;
 
   void VisitAttrs(AttrVisitor* v) {
     v->Visit("buffer_var", &buffer_var);
@@ -522,13 +535,14 @@ class AllocateNode : public StmtNode {
     v->Visit("extents", &extents);
     v->Visit("condition", &condition);
     v->Visit("body", &body);
+    v->Visit("annotations", &annotations);
     v->Visit("span", &span);
   }
 
   bool SEqualReduce(const AllocateNode* other, SEqualReducer equal) const {
     return equal.DefEqual(buffer_var, other->buffer_var) && equal(dtype, other->dtype) &&
            equal(extents, other->extents) && equal(condition, other->condition) &&
-           equal(body, other->body);
+           equal(body, other->body) && equal(annotations, other->annotations);
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -537,6 +551,7 @@ class AllocateNode : public StmtNode {
     hash_reduce(extents);
     hash_reduce(condition);
     hash_reduce(body);
+    hash_reduce(annotations);
   }
 
   /*!
@@ -564,7 +579,8 @@ class AllocateNode : public StmtNode {
 class Allocate : public Stmt {
  public:
   TVM_DLL Allocate(Var buffer_var, DataType dtype, Array<PrimExpr> extents, PrimExpr condition,
-                   Stmt body, Span span = Span());
+                   Stmt body, Map<String, ObjectRef> annotations = Map<String, ObjectRef>(),
+                   Span span = Span());
 
   TVM_DEFINE_OBJECT_REF_METHODS(Allocate, Stmt, AllocateNode);
 };
@@ -859,6 +875,7 @@ class For : public Stmt {
               Map<String, ObjectRef> annotations = Map<String, ObjectRef>(), Span span = Span());
 
   TVM_DEFINE_OBJECT_REF_METHODS(For, Stmt, ForNode);
+  TVM_DEFINE_OBJECT_REF_COW_METHOD(ForNode);
 };
 
 /*!
@@ -991,13 +1008,22 @@ class BufferRegion : public ObjectRef {
   TVM_DLL explicit BufferRegion(Buffer buffer, Array<Range> region);
 
   /*!
-   * \brief Create a BufferRegion which is full region of the given buffer..
+   * \brief Create a BufferRegion which is full region of the given buffer.
    * \param buffer The buffer to generate full BufferRegion.
    * \return The BufferRegion which covers all region of the given buffer
    */
   TVM_DLL static BufferRegion FullRegion(Buffer buffer);
 
+  /*!
+   * \brief Create a BufferRegion which is a single point of the given buffer.
+   * \param buffer The buffer to generate single point BufferRegion.
+   * \param indices The access point indices of the buffer
+   * \return The BufferRegion which is the single point of the given buffer.
+   */
+  TVM_DLL static BufferRegion FromPoint(Buffer buffer, Array<PrimExpr> indices);
+
   TVM_DEFINE_OBJECT_REF_METHODS(BufferRegion, ObjectRef, BufferRegionNode);
+  TVM_DEFINE_OBJECT_REF_COW_METHOD(BufferRegionNode);
 };
 
 /*!
@@ -1052,17 +1078,17 @@ class MatchBufferRegion : public ObjectRef {
  * \note Block's body is parameterized by iter vars.
  * \code
  *
- *  with tir.block([extent0, extent1, ...], name) as [v0, v1, ...]:
- *      tir.bind(v0, value0)
- *      tir.bind(v1, value1)
+ *  with T.block(name):
+ *      v0 = T.axis.S(domain, value0)
+ *      v1 = T.axis.R(domain, value1)
  *      ...
- *      tir.reads([buffer0[start:end, ...], ...])
- *      tir.writes([buffer1[start:end, ...], ...])
- *      tir.where(predicate)
- *      buffer2 = tir.alloc_buffer(shape, dtype)
- *      buffer3 = tir.match_buffer(source_buffer[start:end, ...])
- *      tir.attr({attr_key: attr_value, ...})
- *      with tir.init():
+ *      T.reads([buffer0[start:end, ...], ...])
+ *      T.writes([buffer1[start:end, ...], ...])
+ *      T.where(predicate)
+ *      buffer2 = T.alloc_buffer(shape, dtype)
+ *      buffer3 = T.match_buffer(source_buffer[start:end, ...])
+ *      T.attr({attr_key: attr_value, ...})
+ *      with T.init():
  *          // init body
  *      // body
  *
@@ -1225,8 +1251,6 @@ constexpr const char* extern_scope = "extern_scope";
  *  This can hint some code generator to create a new function for compute.
  */
 constexpr const char* compute_scope = "compute_scope";
-/*! \brief Mark storage scope of buffers */
-constexpr const char* storage_scope = "storage_scope";
 /*! \brief Mark storage alignement requirement of buffers */
 constexpr const char* storage_alignment = "storage_alignment";
 /*! \brief Mark storage scope of realization */
@@ -1260,6 +1284,8 @@ constexpr const char* double_buffer_scope = "double_buffer_scope";
  * \brief Marks region used by double buffer write
  */
 constexpr const char* double_buffer_write = "double_buffer_write";
+/*! \brief Mark realization for rolling buffer optimization */
+constexpr const char* rolling_buffer_scope = "rolling_buffer_scope";
 /*! \brief Mark of scan update scope */
 constexpr const char* scan_update_scope = "scan_update_scope";
 /*! \brief Mark of scan init scope */
@@ -1316,6 +1342,21 @@ constexpr const char* fragment_layout = "fragment_layout";
  * \brief Mark that the kernel is hand threaded and doesn't need syncs inserted
  */
 constexpr const char* hand_threaded = "hand_threaded";
+
+/*!
+ * \brief Mark whether the script-completer need to fill in missing access region
+ *        during script parsing.
+ * \note The result should be a integer mask with range [0, 4).
+ *       if (mask & 1) the read region should be detected,
+ *       if (mask & 2) the write region should be detected.
+ */
+constexpr const char* script_parsing_detect_access = "tir.script_parsing_detect_access";
+
+/*!
+ * \brief Mark that the loop should be partitioned.
+ */
+constexpr const char* pragma_loop_partition_hint = "pragma_loop_partition_hint";
+
 /*!
  * \brief Check if attr_key is a pragma key extension
  * \param attr_key The attr key to be compared
@@ -1336,6 +1377,24 @@ TVM_DLL PrimExpr TypeAnnotation(DataType dtype, Span span = Span());
 
 // overload printing of for type.
 TVM_DLL std::ostream& operator<<(std::ostream& os, ForKind kind);
+
+// inline implementations
+inline const char* ForKind2String(ForKind t) {
+  switch (t) {
+    case ForKind::kSerial:
+      return "serial";
+    case ForKind::kParallel:
+      return "parallel";
+    case ForKind::kVectorized:
+      return "vectorized";
+    case ForKind::kUnrolled:
+      return "unroll";
+    case ForKind::kThreadBinding:
+      return "thread_binding";
+  }
+  LOG(FATAL) << "Unknown ForKind" << t;
+  return "Unknown";
+}
 
 }  // namespace tir
 }  // namespace tvm

@@ -57,7 +57,7 @@ def _alter_conv2d_layout(attrs, inputs, tinfos, out_type):
         cfg = dispatch_ctx.query(target, None)
         workload = cfg.workload
     else:
-        impl, outs = relay.backend.compile_engine.select_implementation(
+        impl, outs = relay.backend.te_compiler.select_implementation(
             relay.op.get("nn.conv2d"), attrs, tinfos, out_type, target
         )
         workload = autotvm.task.get_workload(outs)
@@ -338,7 +338,7 @@ def _conv2d_legalize(attrs, inputs, arg_types):
         data = relay.cast(data, "uint8")
 
         # Do external padding as pad value has to be 128.
-        if not (padding[0] == 0 and padding[1] == 0):
+        if any(padding):
             data = relay.nn.pad(data, pad_width=pad_width, pad_value=128)
         new_attrs["padding"] = (0, 0)
 

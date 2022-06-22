@@ -109,7 +109,7 @@ def process(model_name):
                 mod = simplify_model(mod)
             if with_bnns:
                 mod = partition_for_bnns(mod)
-            graph_module = relay.build(mod, target=target, target_host=target, params=params)
+            graph_module = relay.build(mod, target=target, params=params)
 
         lib_name = "deploy.tar"
         path_dso = temp.relpath(lib_name)
@@ -120,7 +120,7 @@ def process(model_name):
 
         module = graph_executor.GraphModule(loaded_lib["default"](dev))
         module.run()
-        return module.get_output(0).asnumpy()
+        return module.get_output(0).numpy()
 
     res_llvm = run(model, TARGET, simplify=True, with_bnns=False)
     res_bnns = run(model, TARGET, simplify=True, with_bnns=True)

@@ -21,16 +21,19 @@ Frontend classes do lazy-loading of modules on purpose, to reduce time spent on
 loading the tool.
 """
 import logging
-import os
 import sys
+import importlib
 from abc import ABC
 from abc import abstractmethod
+from typing import Optional, List, Dict
 from pathlib import Path
 
 import numpy as np
 
 from tvm import relay
 from tvm.driver.tvmc.common import TVMCException
+from tvm.driver.tvmc.common import TVMCImportError
+from tvm.driver.tvmc.model import TVMCModel
 
 
 # pylint: disable=invalid-name
@@ -66,7 +69,7 @@ class Frontend(ABC):
 
         Returns
         -------
-        mod : tvm.relay.Module
+        mod : tvm.IRModule
             The produced relay module.
         params : dict
             The parameters (weights) for the relay module.
@@ -74,24 +77,19 @@ class Frontend(ABC):
         """
 
 
-def import_keras():
-    """ Lazy import function for Keras"""
-    # Keras writes the message "Using TensorFlow backend." to stderr
-    # Redirect stderr during the import to disable this
-    stderr = sys.stderr
-    sys.stderr = open(os.devnull, "w")
+def lazy_import(pkg_name, from_pkg_name=None, hide_stderr=False):
+    """Lazy import a frontend package or subpackage"""
     try:
-        # pylint: disable=C0415
-        import tensorflow as tf
-        from tensorflow import keras
-
-        return tf, keras
+        return importlib.import_module(pkg_name, package=from_pkg_name)
+    except ImportError as error:
+        raise TVMCImportError(pkg_name) from error
     finally:
-        sys.stderr = stderr
+        if hide_stderr:
+            sys.stderr = stderr
 
 
 class KerasFrontend(Frontend):
-    """ Keras frontend for TVMC """
+    """Keras frontend for TVMC"""
 
     @staticmethod
     def name():
@@ -103,7 +101,8 @@ class KerasFrontend(Frontend):
 
     def load(self, path, shape_dict=None, **kwargs):
         # pylint: disable=C0103
-        tf, keras = import_keras()
+        tf = lazy_import("tensorflow")
+        keras = lazy_import("keras", from_pkg_name="tensorflow")
 
         # tvm build currently imports keras directly instead of tensorflow.keras
         try:
@@ -134,11 +133,11 @@ class KerasFrontend(Frontend):
         return relay.frontend.from_keras(model, input_shapes, **kwargs)
 
     def is_sequential_p(self, model):
-        _, keras = import_keras()
+        keras = lazy_import("keras", from_pkg_name="tensorflow")
         return isinstance(model, keras.models.Sequential)
 
     def sequential_to_functional(self, model):
-        _, keras = import_keras()
+        keras = lazy_import("keras", from_pkg_name="tensorflow")
         assert self.is_sequential_p(model)
         input_layer = keras.layers.Input(batch_shape=model.layers[0].input_shape)
         prev_layer = input_layer
@@ -149,7 +148,7 @@ class KerasFrontend(Frontend):
 
 
 class OnnxFrontend(Frontend):
-    """ ONNX frontend for TVMC """
+    """ONNX frontend for TVMC"""
 
     @staticmethod
     def name():
@@ -160,8 +159,7 @@ class OnnxFrontend(Frontend):
         return ["onnx"]
 
     def load(self, path, shape_dict=None, **kwargs):
-        # pylint: disable=C0415
-        import onnx
+        onnx = lazy_import("onnx")
 
         # pylint: disable=E1101
         model = onnx.load(path)
@@ -170,7 +168,7 @@ class OnnxFrontend(Frontend):
 
 
 class TensorflowFrontend(Frontend):
-    """ TensorFlow frontend for TVMC """
+    """TensorFlow frontend for TVMC"""
 
     @staticmethod
     def name():
@@ -181,9 +179,8 @@ class TensorflowFrontend(Frontend):
         return ["pb"]
 
     def load(self, path, shape_dict=None, **kwargs):
-        # pylint: disable=C0415
-        import tensorflow as tf
-        import tvm.relay.testing.tf as tf_testing
+        tf = lazy_import("tensorflow")
+        tf_testing = lazy_import("tvm.relay.testing.tf")
 
         with tf.io.gfile.GFile(path, "rb") as tf_graph:
             content = tf_graph.read()
@@ -197,7 +194,7 @@ class TensorflowFrontend(Frontend):
 
 
 class TFLiteFrontend(Frontend):
-    """ TFLite frontend for TVMC """
+    """TFLite frontend for TVMC"""
 
     @staticmethod
     def name():
@@ -208,8 +205,7 @@ class TFLiteFrontend(Frontend):
         return ["tflite"]
 
     def load(self, path, shape_dict=None, **kwargs):
-        # pylint: disable=C0415
-        import tflite.Model as model
+        model = lazy_import("tflite.Model")
 
         with open(path, "rb") as tf_graph:
             content = tf_graph.read()
@@ -235,7 +231,7 @@ class TFLiteFrontend(Frontend):
 
 
 class PyTorchFrontend(Frontend):
-    """ PyTorch frontend for TVMC """
+    """PyTorch frontend for TVMC"""
 
     @staticmethod
     def name():
@@ -247,8 +243,7 @@ class PyTorchFrontend(Frontend):
         return ["pth", "zip"]
 
     def load(self, path, shape_dict=None, **kwargs):
-        # pylint: disable=C0415
-        import torch
+        torch = lazy_import("torch")
 
         if shape_dict is None:
             raise TVMCException("--input-shapes must be specified for %s" % self.name())
@@ -260,7 +255,34 @@ class PyTorchFrontend(Frontend):
         input_shapes = list(shape_dict.items())
 
         logger.debug("parse Torch model and convert into Relay computation graph")
-        return relay.frontend.from_pytorch(traced_model, input_shapes, **kwargs)
+        return relay.frontend.from_pytorch(
+            traced_model, input_shapes, keep_quantized_weight=True, **kwargs
+        )
+
+
+class PaddleFrontend(Frontend):
+    """PaddlePaddle frontend for TVMC"""
+
+    @staticmethod
+    def name():
+        return "paddle"
+
+    @staticmethod
+    def suffixes():
+        return ["pdmodel", "pdiparams"]
+
+    def load(self, path, shape_dict=None, **kwargs):
+        # pylint: disable=C0415
+        import paddle
+
+        paddle.enable_static()
+        paddle.disable_signal_handler()
+
+        # pylint: disable=E1101
+        exe = paddle.static.Executor(paddle.CPUPlace())
+        prog, _, _ = paddle.static.load_inference_model(path, exe)
+
+        return relay.frontend.from_paddle(prog, shape_dict=shape_dict, **kwargs)
 
 
 ALL_FRONTENDS = [
@@ -269,6 +291,7 @@ ALL_FRONTENDS = [
     TensorflowFrontend,
     TFLiteFrontend,
     PyTorchFrontend,
+    PaddleFrontend,
 ]
 
 
@@ -284,7 +307,7 @@ def get_frontend_names():
     return [frontend.name() for frontend in ALL_FRONTENDS]
 
 
-def get_frontend_by_name(name):
+def get_frontend_by_name(name: str):
     """
     This function will try to get a frontend instance, based
     on the name provided.
@@ -311,7 +334,7 @@ def get_frontend_by_name(name):
     )
 
 
-def guess_frontend(path):
+def guess_frontend(path: str):
     """
     This function will try to imply which framework is being used,
     based on the extension of the file provided in the path parameter.
@@ -340,7 +363,12 @@ def guess_frontend(path):
     raise TVMCException("failed to infer the model format. Please specify --model-format")
 
 
-def load_model(path, model_format=None, shape_dict=None, **kwargs):
+def load_model(
+    path: str,
+    model_format: Optional[str] = None,
+    shape_dict: Optional[Dict[str, List[int]]] = None,
+    **kwargs,
+):
     """Load a model from a supported framework and convert it
     into an equivalent relay representation.
 
@@ -356,10 +384,8 @@ def load_model(path, model_format=None, shape_dict=None, **kwargs):
 
     Returns
     -------
-    mod : tvm.relay.Module
-        The produced relay module.
-    params : dict
-        The parameters (weights) for the relay module.
+    tvmc_model : TVMCModel
+        The produced model package.
 
     """
 
@@ -370,4 +396,4 @@ def load_model(path, model_format=None, shape_dict=None, **kwargs):
 
     mod, params = frontend.load(path, shape_dict, **kwargs)
 
-    return mod, params
+    return TVMCModel(mod, params)
