@@ -599,7 +599,7 @@ class SearchTask(Object):
             state["hardware_params"],
             state["layout_rewrite_option"],
             state["task_input_names"],
-            state["desc"],
+            state.get("desc", ""),
         )
 
 
