@@ -247,3 +247,16 @@ conda/pkg
 _docs/
 jvm/target
 .config/configstore/
+
+# dataset files
+scripts/dataset
+scripts/*.zip
+scripts/today_job.sh
+scripts/progress.txt
+scripts/*.pkl
+scripts/.dataset_cache
+scripts/results.tsv
+scripts/total_latency.tsv
+
+# Workspace
+*.workspace
