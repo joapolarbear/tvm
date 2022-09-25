@@ -48,12 +48,14 @@ def test_cpu_matmul():
     task = auto_scheduler.SearchTask(compute_dag=dag, workload_key="test", target=target)
     names = auto_scheduler.feature.get_per_store_feature_names()
     fea = auto_scheduler.feature.get_per_store_features_from_states([s], task, parse_ast=False)[0]
+    ast_fea = auto_scheduler.feature.get_per_store_features_from_states([s], task, parse_ast=False)[0]
 
     # print("\n")
     # print(s)
     # print(dag)
     print(f"# of feature entries: {len(names)}")
     print(f"Shape of extracted features: {fea.shape}")
+    print(f"Shape of AST features: {ast_fea.shape}")
 
     stage_0 = fea[0]
     assert len(stage_0) == len(names), "%d vs %d" % (len(stage_0), len(names))
