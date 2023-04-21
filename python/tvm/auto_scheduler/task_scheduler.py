@@ -45,9 +45,11 @@ def make_search_policies(
     tasks,
     num_measures_per_round,
     verbose,
+    disable_cost_model_update,
     load_model_file=None,
     load_log_file=None,
     adapative_training=False,
+    preset_cost_model=None,
 ):
     """Make a list of search policies for a list of search tasks.
     It creates one policy per task.
@@ -74,6 +76,8 @@ def make_search_policies(
     adapative_training: bool = False
         Option used by XGBModel to reduce the model training frequency when there're too
         many logs.
+    preset_cost_model:
+        Pre-set cost model
 
     Returns
     -------
@@ -85,11 +89,16 @@ def make_search_policies(
 
     if isinstance(search_policy, str):
         policy_type, model_type = search_policy.split(".")
-        if model_type == "xgb":
+        if preset_cost_model is not None:
+            cost_model = preset_cost_model
+        elif model_type.startswith("xgb"):
+            if model_type.endswith("-no-update"):
+                disable_cost_model_update = True
             cost_model = XGBModel(
                 num_warmup_sample=len(tasks) * num_measures_per_round,
                 model_file=load_model_file,
                 adapative_training=adapative_training,
+                disable_update=disable_cost_model_update,
             )
             if load_model_file and os.path.isfile(load_model_file):
                 logger.info("TaskScheduler: Load pretrained model...")
@@ -285,6 +294,7 @@ class TaskScheduler:
         search_policy_params=None,
         adapative_training=False,
         per_task_early_stopping=None,
+        preset_cost_model=None,
     ):
         """Tune a batch of tasks together.
 
@@ -305,6 +315,8 @@ class TaskScheduler:
             too many logs.
         per_task_early_stopping : Optional[int]
             Stop tuning a task early if getting no improvement after n measurements.
+        preset_cost_model :
+            preset cost model
         """
         # init members
         self.tune_option = tune_option
@@ -315,12 +327,28 @@ class TaskScheduler:
             1e20 if per_task_early_stopping is None else per_task_early_stopping
         )
 
-        self.measurer = ProgramMeasurer(
-            tune_option.builder,
-            tune_option.runner,
-            tune_option.measure_callbacks,
-            tune_option.verbose,
-        )
+        if tune_option.num_measure_trials < 0:
+            # Do no run measurement, but run search and generate one records for each task.
+            # self.measurer = ProgramMeasurer(EmptyBuilder(), EmptyRunner(),
+            #                                 tune_option.measure_callbacks, tune_option.verbose)
+            self.measurer = ProgramMeasurer(
+                tune_option.builder,
+                tune_option.runner,
+                tune_option.measure_callbacks,
+                tune_option.verbose,
+            )
+            num_measure_trials = len(self.tasks)
+            disable_cost_model_update = True
+        else:
+            num_measure_trials = tune_option.num_measure_trials
+            self.measurer = ProgramMeasurer(
+                tune_option.builder,
+                tune_option.runner,
+                tune_option.measure_callbacks,
+                tune_option.verbose,
+            )
+            disable_cost_model_update = False
+
         self.ct = self.best_ct = 0
         self.tic = time.time()
 
@@ -345,9 +373,11 @@ class TaskScheduler:
             self.tasks,
             self.num_measures_per_round,
             tune_option.verbose,
+            disable_cost_model_update,
             self.load_model_file,
             self.load_log_file,
             adapative_training,
+            preset_cost_model
         )
 
         # do a round robin first to warm up

@@ -110,6 +110,7 @@ class XGBModel(PythonBasedModel):
         seed=None,
         model_file=None,
         adapative_training=False,
+        disable_update=False,
     ):
         global xgb
         try:
@@ -139,6 +140,7 @@ class XGBModel(PythonBasedModel):
         self.bst = None
         self.plan_size = 32
         self.num_warmup_sample = num_warmup_sample
+        self.disable_update = disable_update
         self.verbose_eval = verbose_eval
         self.model_file = model_file
         self.adapative_training = adapative_training
@@ -161,7 +163,7 @@ class XGBModel(PythonBasedModel):
         results : List[MeasureResult]
             The measurement results
         """
-        if len(inputs) <= 0:
+        if self.disable_update or len(inputs) <= 0:
             return
         assert len(inputs) == len(results)
 
