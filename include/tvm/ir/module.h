@@ -458,6 +458,10 @@ class IRModule : public ObjectRef {
  */
 TVM_DLL String PrettyPrint(const ObjectRef& node);
 
+void TLPPrint(const ObjectRef& node);
+void TLPPrintStr(const std::string str);
+void TLPPrintObj(const Object* node);
+
 /*!
  * \brief Render the node as a string in the text format.
  *

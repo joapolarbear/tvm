@@ -71,6 +71,16 @@ class XGBDMatrixContext:
 dmatrix_context = XGBDMatrixContext()
 
 
+def get_workload_embedding(workload_key):
+    tags = ['max', 'min', 'add', 'Conv2dOutput', 'conv2d_winograd', 'DepthwiseConv2d',
+            'dense', 'softmax', 'compute(b, i, j)']
+    dag_str = str(ComputeDAG(workload_key_to_tensors(workload_key)))
+    vec = [0] * len(tags)
+    for i, tag in enumerate(tags):
+        if tag in dag_str:
+            vec[i] = 1
+    return vec
+
 class XGBModel(PythonBasedModel):
     """Train a XGBoost model to predict the normalized throughputs of programs.
     Let the normalized throughput be the score of a program (higher is better). We predict
