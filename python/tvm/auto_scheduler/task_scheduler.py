@@ -106,8 +106,7 @@ def make_search_policies(
                     num_warmup_sample=len(tasks) * num_measures_per_round,
                     model_file=load_model_file,
                     adapative_training=adapative_training,
-                    disable_update=disable_cost_model_update,
-                    few_shot_learning=few_shot_learning
+                    disable_update=disable_cost_model_update
                 )
             elif model_type in ['tab', 'tab-no-update']:
                 cost_model = TabNetModel(

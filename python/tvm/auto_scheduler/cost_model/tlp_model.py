@@ -4,6 +4,13 @@ import logging
 from .cost_model import PythonBasedModel
 from tvm.auto_scheduler.feature import get_per_store_features_from_states_tlp, get_per_store_features_from_states_tlp_init
 
+class CustomUnpickler(pickle.Unpickler):
+
+    def find_class(self, module, name):
+        if name == 'AttentionModule':
+            from tlp_train import AttentionModule
+            return AttentionModule
+        return super().find_class(module, name)
 
 logger = logging.getLogger("auto_scheduler")
 
@@ -36,5 +43,5 @@ class TLPModel(PythonBasedModel):
 
     def load(self, file_name: str):
         with open(file_name, 'rb') as f:
-            self.model = pickle.load(f).module.to('cuda:0')
+            self.model = CustomUnpickler(f).load().module.to('cuda:0')
         self.model.eval()
